@@ -72,7 +72,9 @@ let local = null; // { code, who: 'a'|'b' }
 try { local = JSON.parse(localStorage.getItem(LOCAL_KEY)); } catch (e) { /* none yet */ }
 let state = null;          // live room document
 let unsubscribe = null;
-let ui = { view: "today", picking: false, drawingMore: false, editing: false, justRevealed: false, joinStep: null, joinNames: null, joinCode: null, online: true };
+let ui = { view: "today", picking: false, drawingMore: false, editing: false, joinStep: null, joinNames: null, joinCode: null, online: true };
+let lastSig = null; // signature of the last thing we rendered, to skip no-op re-renders
+const seenCards = new Set(); // today's card ids we've already shown, so each animates in only once
 
 const roomRef = () => doc(db, "rooms", local.code);
 
@@ -145,6 +147,7 @@ function leaveRoom() {
   unsubscribe = null;
   local = null;
   state = null;
+  seenCards.clear();
   localStorage.removeItem(LOCAL_KEY);
   ui = { ...ui, view: "today", joinStep: null, editing: false };
   render();
@@ -249,7 +252,6 @@ async function reveal(theme) {
       }
       tx.update(roomRef(), { order, pos, cycle, streak, today: { date: t, cards: [...today.cards, qid] } });
     });
-    ui.justRevealed = true;
   } catch (e) {
     console.error(e);
     toast("Couldn't draw a question — you need to be online for this one.");
@@ -257,12 +259,20 @@ async function reveal(theme) {
 }
 
 async function sealAnswer(qid, text) {
+  const draft = text.trim();
+  // Leave edit mode BEFORE the write. Firestore applies the write to the local
+  // cache and fires the snapshot optimistically; if we were still in edit mode at
+  // that point it would rebuild the open textarea (one flicker) and then rebuild
+  // again into the sealed view (a second). Exiting first means that single
+  // optimistic snapshot paints the sealed state directly — no double flicker.
+  ui.editing = false;
   try {
-    await updateDoc(roomRef(), { [`notes.${qid}.${local.who}`]: text.trim() });
-    ui.editing = false;
+    await updateDoc(roomRef(), { [`notes.${qid}.${local.who}`]: draft });
   } catch (e) {
     console.error(e);
-    toast("Couldn't seal the answer — it's still in the box, try again.");
+    toast("Couldn't seal the answer — try again.");
+    ui.editing = qid; // reopen the editor so the answer isn't lost
+    render();
     return;
   }
   render();
@@ -363,7 +373,7 @@ function cardHtml(q, animate) {
   const t = THEMES[q.theme];
   const fav = (state.favs || []).includes(q.id);
   return `
-    <div class="qcard rise">
+    <div class="qcard${animate ? " rise" : ""}">
       <div class="top">
         <span class="eyebrow" style="color:${t.color}">${esc(t.label)}</span>
         <button class="heart-btn" data-action="fav" data-qid="${q.id}"
@@ -490,14 +500,18 @@ function todayView() {
   const cardsHtml = cards
     .map((id) => QById[id])
     .filter(Boolean)
-    .map((q, i, arr) => cardHtml(q, ui.justRevealed && i === arr.length - 1))
+    .map((q) => {
+      const isNew = !seenCards.has(q.id); // animate a card in only the first time it appears
+      seenCards.add(q.id);
+      return cardHtml(q, isNew);
+    })
     .join("");
   const more = ui.drawingMore
     ? `<p class="hint" style="margin:4px 0 0">From anywhere, or a theme?</p>
        <div style="margin-top:10px"><button class="btn-small" data-action="reveal">Surprise us</button></div>
        ${chipsHtml("reveal-theme")}
        <button class="btn-ghost" style="margin-top:14px" data-action="stop-drawing">actually, this is enough for tonight</button>`
-    : `<button class="btn-outline" data-action="start-drawing">Draw another</button>`;
+    : `<button class="btn-outline" style="margin-top:22px" data-action="start-drawing">Draw another</button>`;
   return `
     ${cardsHtml}
     <div class="center">
@@ -544,6 +558,14 @@ function archiveView() {
 }
 
 function render() {
+  // Firestore (esp. with metadata changes) fires the snapshot repeatedly with
+  // identical data — local write, then server ack. Rebuilding innerHTML each time
+  // re-creates every node and replays entrance animations, which reads as flicker.
+  // If nothing the view depends on changed, skip the rebuild entirely.
+  const sig = JSON.stringify([todayKey(), local, state, ui]);
+  if (sig === lastSig) return;
+  lastSig = sig;
+
   if (!configured) { app.innerHTML = configMissingView(); return; }
   if (!local) { app.innerHTML = welcomeView(); return; }
   if (!state) {
@@ -599,15 +621,15 @@ app.addEventListener("click", (e) => {
     case "leave":
       if (window.confirm("Disconnect this phone from the room? Your shared answers stay safe in the room — you can rejoin with the code.")) leaveRoom();
       break;
-    case "nav": ui.view = view; ui.editing = false; ui.justRevealed = false; render(); break;
+    case "nav": ui.view = view; ui.editing = false; render(); break;
     case "reveal": reveal(); break;
     case "reveal-theme": reveal(theme); break;
     case "start-picking": ui.picking = true; render(); break;
     case "stop-picking": ui.picking = false; render(); break;
-    case "start-drawing": ui.drawingMore = true; ui.justRevealed = false; render(); break;
+    case "start-drawing": ui.drawingMore = true; render(); break;
     case "stop-drawing": ui.drawingMore = false; render(); break;
     case "fav": toggleFav(qid); break;
-    case "edit": ui.editing = qid; ui.justRevealed = false; render(); break;
+    case "edit": ui.editing = qid; render(); break;
     case "cancel-edit": ui.editing = false; render(); break;
     case "seal": {
       const text = document.getElementById(`draft-${qid}`).value;
@@ -633,9 +655,10 @@ function shareJoin() {
   }
 }
 
-// roll the day over when the app returns from the background
+// roll the day over when the app returns from the background (the render
+// signature includes today's date, so this picks up a midnight crossover)
 document.addEventListener("visibilitychange", () => {
-  if (!document.hidden && state) { ui.justRevealed = false; render(); }
+  if (!document.hidden && state) render();
 });
 
 // ——— boot ———
