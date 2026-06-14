@@ -186,6 +186,13 @@ const QUESTION_BANK = {
     "Direct every second: describe in detail exactly how you'd want tonight to go.",
     "What's a boundary you're curious to push with me — and how would you want me to start?",
     "When you imagine losing control completely with me, what does that look like?",
+    "What's the dirtiest thought you've had about me today?",
+    "If I pinned you down right now, what would you want me to do next?",
+    "What's something filthy you've wanted to whisper to me but haven't dared?",
+    "Where's the most daring place you'd want to risk getting caught with me?",
+    "What do you want me to make you beg for?",
+    "Name one rule you'd want me to follow in bed tonight — and one you'd want to break.",
+    "What would you do to me if you knew no one would ever find out?",
   ],
 };
 

@@ -1,6 +1,8 @@
-// Between Us (sync) — cache the app shell + fonts. NEVER intercept Firestore
-// traffic: a cache-first response would freeze live sync.
-const CACHE = "between-us-sync-v15";
+// Between Us (sync) — offline support without staleness. Our own files are served
+// network-first (so a new deploy shows up immediately when online, cache only as
+// an offline fallback); fonts and the versioned Firebase SDK are immutable so they
+// stay cache-first. NEVER intercept Firestore traffic — that would freeze live sync.
+const CACHE = "between-us-sync-v16";
 const SHELL = ["./", "./index.html", "./style.css", "./app.js", "./questions.js", "./firebase-config.js", "./manifest.json", "./icon-192.png", "./icon-512.png"];
 
 self.addEventListener("install", (e) => {
@@ -21,15 +23,33 @@ self.addEventListener("fetch", (e) => {
   const sameOrigin = url.origin === self.location.origin;
   const isFont = url.hostname === "fonts.googleapis.com" || url.hostname === "fonts.gstatic.com";
   const isSdk = url.hostname === "www.gstatic.com" && url.pathname.startsWith("/firebasejs/");
-  if (!sameOrigin && !isFont && !isSdk) return; // let Firestore & everything else hit the network untouched
+  if (!sameOrigin && !isFont && !isSdk) return; // Firestore & everything else: untouched
+
+  // Immutable third-party assets (web fonts, version-pinned Firebase SDK): cache-first.
+  if (isFont || isSdk) {
+    e.respondWith(
+      caches.match(e.request).then((hit) =>
+        hit ||
+        fetch(e.request).then((res) => {
+          const copy = res.clone();
+          caches.open(CACHE).then((c) => c.put(e.request, copy)).catch(() => {});
+          return res;
+        })
+      )
+    );
+    return;
+  }
+
+  // Our own app files: network-first. Fetch fresh (bypassing the HTTP cache so a
+  // new deploy is picked up at once), update the cache, and fall back to the
+  // cached copy — or the app shell — only when the network is unavailable.
   e.respondWith(
-    caches.match(e.request).then((hit) =>
-      hit ||
-      fetch(e.request).then((res) => {
+    fetch(e.request, { cache: "no-cache" })
+      .then((res) => {
         const copy = res.clone();
         caches.open(CACHE).then((c) => c.put(e.request, copy)).catch(() => {});
         return res;
       })
-    )
+      .catch(() => caches.match(e.request).then((hit) => hit || caches.match("./index.html")))
   );
 });
