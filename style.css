@@ -157,11 +157,14 @@ button:focus-visible { outline: 2px solid var(--amber); outline-offset: 3px; }
 @keyframes breathe { 0%,100% { opacity:.45; transform:translateX(-50%) scale(1);} 50% { opacity:.8; transform:translateX(-50%) scale(1.06);} }
 @keyframes word { from { opacity:0; transform:translateY(8px);} to { opacity:1; transform:translateY(0);} }
 @keyframes rise { from { opacity:0; transform:translateY(12px);} to { opacity:1; transform:translateY(0);} }
+@keyframes busyPulse { 0%,100% { opacity:.5; } 50% { opacity:.85; } }
 .word { display: inline-block; opacity: 0; animation: word 0.7s ease forwards; }
 .rise { animation: rise 0.6s ease both; }
+.busy { animation: busyPulse 0.9s ease-in-out infinite; pointer-events: none; cursor: progress; }
 
 @media (prefers-reduced-motion: reduce) {
   .word, .rise { animation: none; opacity: 1; transform: none; }
+  .busy { animation: none; opacity: 0.55; }
   .glow { animation: none; opacity: 0.6; }
   button:hover { transform: none; }
 }

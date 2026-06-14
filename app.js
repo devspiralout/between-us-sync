@@ -12,6 +12,9 @@ import {
   doc, getDoc, setDoc, updateDoc, onSnapshot, runTransaction,
   arrayUnion, arrayRemove,
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+import {
+  getAuth, GoogleAuthProvider, signInWithPopup, signOut as fbSignOut, onAuthStateChanged,
+} from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
 import { firebaseConfig } from "./firebase-config.js";
 
 const { Q, QById, TOTAL, THEMES } = window;
@@ -61,29 +64,36 @@ function toast(msg) {
 
 // ——— firebase ———
 const configured = firebaseConfig.apiKey && !firebaseConfig.apiKey.startsWith("PASTE");
-let db = null;
+let db = null, auth = null;
+const provider = new GoogleAuthProvider();
 if (configured) {
   const fbApp = initializeApp(firebaseConfig);
   db = initializeFirestore(fbApp, { localCache: persistentLocalCache() });
+  auth = getAuth(fbApp);
 }
 
 // ——— state ———
-let local = null; // { code, who: 'a'|'b' }
-try { local = JSON.parse(localStorage.getItem(LOCAL_KEY)); } catch (e) { /* none yet */ }
+let local = null;          // { code, who: 'a'|'b' } — this device's room + identity
 let state = null;          // live room document
 let unsubscribe = null;
+let user = null;           // signed-in Google account (null = signed out)
+let authReady = false;     // has Firebase reported the initial auth state yet?
+let roomResolved = false;  // have we finished deciding which room this account is in?
+let pendingRoom = null;    // a code from a ?room= link, waiting for sign-in
 let ui = { view: "today", picking: false, drawingMore: false, editing: false, joinStep: null, joinNames: null, joinCode: null, online: true };
 let lastSig = null; // signature of the last thing we rendered, to skip no-op re-renders
 const seenCards = new Set(); // today's card ids we've already shown, so each animates in only once
 
 const roomRef = () => doc(db, "rooms", local.code);
+const userRef = () => doc(db, "users", user.uid); // account → room mapping
+const readLocal = () => { try { return JSON.parse(localStorage.getItem(LOCAL_KEY)); } catch (e) { return null; } };
 
 function subscribe() {
   if (unsubscribe) unsubscribe();
   unsubscribe = onSnapshot(roomRef(), { includeMetadataChanges: true }, (snap) => {
     if (!snap.exists()) {
       toast("This room no longer exists.");
-      leaveRoom();
+      exitRoom();
       return;
     }
     state = snap.data();
@@ -148,13 +158,89 @@ async function migrateToStableIds() {
   }
 }
 
-function leaveRoom() {
-  if (unsubscribe) unsubscribe();
-  unsubscribe = null;
-  local = null;
-  state = null;
-  seenCards.clear();
+// ——— auth ———
+function signIn(btn) {
+  return withBusy(btn, async () => {
+    try {
+      await signInWithPopup(auth, provider); // onAuthStateChanged takes it from here
+    } catch (e) {
+      console.error(e);
+      // closing the popup or double-tapping isn't really an error — stay quiet
+      if (e.code === "auth/popup-closed-by-user" || e.code === "auth/cancelled-popup-request") return;
+      // surface the actual Firebase reason so setup issues are diagnosable
+      toast(`Sign-in failed: ${e.code || e.message || "unknown error"}`);
+    }
+  });
+}
+
+async function signOutUser() {
+  if (unsubscribe) { unsubscribe(); unsubscribe = null; }
+  local = null; state = null; roomResolved = false; seenCards.clear();
   localStorage.removeItem(LOCAL_KEY);
+  try { await fbSignOut(auth); } catch (e) { console.error(e); }
+  render();
+}
+
+// link (or unlink) the signed-in account to a room, so any device they sign in on
+// lands straight back in it — this is what removes the "remember the code" burden.
+async function rememberRoom(code, who) {
+  if (!user) return;
+  try { await setDoc(userRef(), { room: code, who }); }
+  catch (e) { console.error("couldn't link room to account:", e); }
+}
+
+// Decide what to show whenever the auth state settles or changes.
+async function resolveAuth() {
+  if (!user) { // signed out → clear everything, the gate renders
+    if (unsubscribe) { unsubscribe(); unsubscribe = null; }
+    local = null; state = null; roomResolved = false; seenCards.clear();
+    render();
+    return;
+  }
+  if (local && unsubscribe) { roomResolved = true; render(); return; } // already in a room
+
+  // 1) does this account already point at a room?
+  try {
+    const snap = await getDoc(userRef());
+    if (snap.exists() && snap.data().room) {
+      local = { code: snap.data().room, who: snap.data().who || "a" };
+      localStorage.setItem(LOCAL_KEY, JSON.stringify(local));
+      roomResolved = true;
+      subscribe();
+      render();
+      return;
+    }
+  } catch (e) { console.error("room lookup failed:", e); }
+
+  // 2) a device that used the app before accounts existed — adopt its saved room
+  const legacy = readLocal();
+  if (legacy && legacy.code) {
+    local = legacy;
+    roomResolved = true;
+    rememberRoom(legacy.code, legacy.who || "a");
+    subscribe();
+    render();
+    return;
+  }
+
+  // 3) arrived via a join link → go into the join flow now that we're signed in
+  roomResolved = true;
+  if (pendingRoom) {
+    const code = pendingRoom; pendingRoom = null;
+    lookupRoom(code);
+    return;
+  }
+  // 4) brand new account, no room → show create / join
+  render();
+}
+
+// the room was deleted out from under us (e.g. from the Firebase console):
+// drop the account link so we stop trying to load it, and return to the welcome
+async function exitRoom() {
+  if (unsubscribe) { unsubscribe(); unsubscribe = null; }
+  local = null; state = null; roomResolved = true; seenCards.clear();
+  localStorage.removeItem(LOCAL_KEY);
+  if (user) { try { await setDoc(userRef(), { room: null, who: null }); } catch (e) {} }
   ui = { ...ui, view: "today", joinStep: null, editing: false };
   render();
 }
@@ -178,6 +264,8 @@ async function createRoom(name) {
     await setDoc(doc(db, "rooms", code), fresh);
     local = { code, who: "a" };
     localStorage.setItem(LOCAL_KEY, JSON.stringify(local));
+    roomResolved = true;
+    rememberRoom(code, "a"); // tie this room to the creator's account
     ui.joinStep = "share"; // show the code once, prominently
     subscribe();
   } catch (e) {
@@ -208,8 +296,11 @@ async function lookupRoom(code) {
 function joinAs(who) {
   local = { code: ui.joinCode, who };
   localStorage.setItem(LOCAL_KEY, JSON.stringify(local));
+  roomResolved = true;
+  rememberRoom(ui.joinCode, who);
   ui.joinStep = null;
   subscribe();
+  render(); // show "finding your room…" right away while the first snapshot loads
 }
 
 // newcomer joining a fresh room: they take slot b and write their own name
@@ -223,8 +314,11 @@ async function joinAsNew(name) {
   }
   local = { code: ui.joinCode, who: "b" };
   localStorage.setItem(LOCAL_KEY, JSON.stringify(local));
+  roomResolved = true;
+  rememberRoom(ui.joinCode, "b");
   ui.joinStep = null;
   subscribe();
+  render(); // show "finding your room…" right away while the first snapshot loads
 }
 
 async function reveal(theme) {
@@ -261,6 +355,7 @@ async function reveal(theme) {
   } catch (e) {
     console.error(e);
     toast("Couldn't draw a question — you need to be online for this one.");
+    render(); // the draw failed; reflect the reset picking/drawing state
   }
 }
 
@@ -391,6 +486,23 @@ function cardHtml(q, animate) {
 }
 
 // ——— screens ———
+function loadingView(msg) {
+  return `<div class="setup-wrap"><p class="bu-serif" style="font-style:italic; font-size:18px; color:var(--dim)">${esc(msg)}</p></div>`;
+}
+
+function signedOutView() {
+  return `
+    <div class="setup-wrap">
+      <div class="setup rise" style="text-align:center">
+        <h1 class="bu-serif">Between Us</h1>
+        <p>One question a day, answered apart, revealed together.${pendingRoom
+          ? " Sign in to join your partner's room."
+          : " Sign in once and your room follows you to any device — no codes to remember."}</p>
+        <button class="btn-primary" data-action="sign-in">Sign in with Google</button>
+      </div>
+    </div>`;
+}
+
 function configMissingView() {
   return `
     <div class="setup-wrap">
@@ -568,16 +680,16 @@ function render() {
   // identical data — local write, then server ack. Rebuilding innerHTML each time
   // re-creates every node and replays entrance animations, which reads as flicker.
   // If nothing the view depends on changed, skip the rebuild entirely.
-  const sig = JSON.stringify([todayKey(), local, state, ui]);
+  const sig = JSON.stringify([todayKey(), local, state, ui, user ? user.uid : null, authReady, roomResolved, pendingRoom]);
   if (sig === lastSig) return;
   lastSig = sig;
 
   if (!configured) { app.innerHTML = configMissingView(); return; }
+  if (!authReady) { app.innerHTML = loadingView("…"); return; }
+  if (!user) { app.innerHTML = signedOutView(); return; }
+  if (!roomResolved) { app.innerHTML = loadingView("finding your room…"); return; }
   if (!local) { app.innerHTML = welcomeView(); return; }
-  if (!state) {
-    app.innerHTML = `<div class="setup-wrap"><p class="bu-serif" style="font-style:italic; font-size:18px; color:var(--dim)">finding your room…</p></div>`;
-    return;
-  }
+  if (!state) { app.innerHTML = loadingView("finding your room…"); return; }
   if (ui.joinStep === "share") { app.innerHTML = shareCodeView(); return; }
 
   const streak = state.streak.count > 0
@@ -598,10 +710,23 @@ function render() {
     <main>${ui.view === "today" ? todayView() : ui.view === "story" ? archiveView() : keptView()}</main>
     <p class="progress-line" style="margin:0 0 18px">
       ${ui.online ? "" : "offline — changes will sync when you're back · "}you're ${esc(state.names[local.who])} · room ${prettyCode(local.code)} ·
-      <button class="btn-ghost" style="font-size:11.5px" data-action="leave">leave on this phone</button>
+      <button class="btn-ghost" style="font-size:11.5px" data-action="sign-out">sign out</button>
     </p>`;
   const ta = app.querySelector("textarea");
   if (ta && ui.editing !== false) ta.focus();
+}
+
+// Subtle "working…" state for buttons that hit the network: dim + pulse and lock
+// out repeat taps while the request is in flight. If the action re-renders on
+// success the button is gone, so restoring is a harmless no-op; on failure (no
+// re-render) the button comes back so it can be tried again.
+async function withBusy(btn, fn) {
+  if (btn) { btn.disabled = true; btn.classList.add("busy"); }
+  try {
+    await fn();
+  } finally {
+    if (btn && btn.isConnected) { btn.disabled = false; btn.classList.remove("busy"); }
+  }
 }
 
 // ——— events ———
@@ -610,26 +735,27 @@ app.addEventListener("click", (e) => {
   if (!btn) return;
   const { action, qid, theme, view, who } = btn.dataset;
   switch (action) {
+    case "sign-in": signIn(btn); break;
     case "show-create": ui.joinStep = "create"; render(); break;
     case "show-join": ui.joinStep = "join"; render(); break;
     case "back-welcome": ui.joinStep = null; render(); break;
     case "create-room": {
       const name = document.getElementById("name-a").value.trim() || "You";
-      createRoom(name);
+      withBusy(btn, () => createRoom(name));
       break;
     }
-    case "lookup": lookupRoom(cleanCode(document.getElementById("join-code").value)); break;
+    case "lookup": withBusy(btn, () => lookupRoom(cleanCode(document.getElementById("join-code").value))); break;
     case "join-as": joinAs(who); break;
-    case "join-name": joinAsNew(document.getElementById("join-name").value); break;
+    case "join-name": withBusy(btn, () => joinAsNew(document.getElementById("join-name").value)); break;
     case "share-link": shareJoin(); break;
     case "copy-code": navigator.clipboard?.writeText(prettyCode(local.code)).then(() => toast("Copied.")); break;
     case "dismiss-share": ui.joinStep = null; render(); break;
-    case "leave":
-      if (window.confirm("Disconnect this phone from the room? Your shared answers stay safe in the room — you can rejoin with the code.")) leaveRoom();
+    case "sign-out":
+      if (window.confirm("Sign out on this device? Your room and all your answers stay safe — sign back in any time, on any device, to return. No code needed.")) signOutUser();
       break;
     case "nav": ui.view = view; ui.editing = false; render(); break;
-    case "reveal": reveal(); break;
-    case "reveal-theme": reveal(theme); break;
+    case "reveal": withBusy(btn, () => reveal()); break;
+    case "reveal-theme": withBusy(btn, () => reveal(theme)); break;
     case "start-picking": ui.picking = true; render(); break;
     case "stop-picking": ui.picking = false; render(); break;
     case "start-drawing": ui.drawingMore = true; render(); break;
@@ -640,10 +766,10 @@ app.addEventListener("click", (e) => {
     case "seal": {
       const text = document.getElementById(`draft-${qid}`).value;
       if (!text.trim()) return;
-      sealAnswer(qid, text);
+      withBusy(btn, () => sealAnswer(qid, text));
       break;
     }
-    case "reveal-early": revealEarly(qid); break;
+    case "reveal-early": withBusy(btn, () => revealEarly(qid)); break;
   }
 });
 
@@ -668,14 +794,18 @@ document.addEventListener("visibilitychange", () => {
 });
 
 // ——— boot ———
-if (configured && local) subscribe();
-
-// opened from a shared "?room=CODE" link, and not already in a room?
-// look the room up so we land on the name/whoami step, then clean the URL.
+// A "?room=CODE" link gets stashed and handled after sign-in (in resolveAuth),
+// then stripped from the URL so a refresh doesn't re-trigger it.
 const urlRoom = new URLSearchParams(location.search).get("room");
-if (configured && !local && urlRoom) {
-  lookupRoom(cleanCode(urlRoom));
+if (urlRoom) {
+  pendingRoom = cleanCode(urlRoom);
   history.replaceState(null, "", location.pathname);
+}
+
+// Firebase restores the signed-in user asynchronously; render a loading state
+// until it reports back, then resolveAuth decides where to send us.
+if (configured && auth) {
+  onAuthStateChanged(auth, (u) => { user = u || null; authReady = true; resolveAuth(); });
 }
 
 render();

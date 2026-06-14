@@ -21,7 +21,19 @@ with yours, keeping the `export const firebaseConfig =` at the front. That's the
 only code change. (This config is not a secret — it just names your project.
 Access is controlled by the rules in step 3.)
 
-## Step 3 — Turn on Firestore and set the rules
+## Step 3 — Turn on Google sign-in
+
+The app signs you in with Google so your room follows you to any device — no
+codes to remember — and so only signed-in people can touch your data.
+
+1. In the Firebase console sidebar: **Build → Authentication → Get started**
+2. Under **Sign-in method**, pick **Google** → toggle **Enable** → choose a
+   project support email → **Save**
+3. Go to **Authentication → Settings → Authorized domains → Add domain** and add
+   the domain you'll host on (e.g. `yourname.github.io`). `localhost` is already
+   listed, which covers local testing.
+
+## Step 4 — Turn on Firestore and set the rules
 
 1. In the Firebase console sidebar: **Build → Firestore Database → Create database**
 2. Pick a location near you → start in **production mode** → Enable
@@ -31,41 +43,50 @@ Access is controlled by the rules in step 3.)
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    // Rooms can be read/written only by direct path — there is no way to
-    // list or search rooms, so the unguessable room code is the key.
+    // Rooms are reachable only by their unguessable code (no listing), and now
+    // only by someone who is signed in.
     match /rooms/{room} {
-      allow get, create, update: if true;
+      allow get, create, update: if request.auth != null;
       allow list, delete: if false;
+    }
+    // Each person's account → room link. Readable/writable only by that account.
+    match /users/{uid} {
+      allow read, write: if request.auth != null && request.auth.uid == uid;
     }
   }
 }
 ```
 
-What this means honestly: anyone who has your exact 12-character room code could
-read and write your room, but nobody can discover codes — there are ~10^17
-possibilities and listing is forbidden. For two people's private ritual that's a
-reasonable lock. If you ever want bank-grade hardening (Firebase Anonymous Auth
-with per-device membership), that's a later upgrade.
+What this means honestly: you must be signed in to read or write anything, and
+rooms still can't be listed or discovered — the unguessable code is only needed
+once, to pair. Your account remembers your room after that. (A further hardening
+step would lock each room to its two specific accounts; the rules above already
+require sign-in, which closes the main gap.)
 
-## Step 4 — Host the folder
+## Step 5 — Host the folder
 
 Same as the offline version — any free static host, e.g.:
 
 - **Netlify Drop**: drag this folder onto https://app.netlify.com/drop → done
 - **GitHub Pages / Cloudflare Pages / Vercel**: upload to a repo and enable Pages
 
-## Step 5 — Pair your phones
+Whatever domain you land on, make sure it's in the **Authorized domains** list
+from Step 3 — otherwise Google sign-in will refuse to run there.
+
+## Step 6 — Pair your phones
 
 1. Both of you open the URL and **Add to Home Screen**
    (iPhone: Safari Share → Add to Home Screen · Android: Chrome install prompt)
-2. One phone: **Start a new room** → enter both names → say whose phone it is
-3. It shows a room code like `mkr3-x8wq-p2na` — read it out or send it
-4. Other phone: **Join with a code** → enter it → tap your name
+2. Both of you tap **Sign in with Google** the first time
+3. One phone: **Start a new room** → enter your name → you get a join link
+4. Send your partner the link (or read them the room code)
+5. Partner: tap the link (or **Join with a code**) → enter their name
 
-From then on you're synced: one of you draws the day's question and it appears on
-both phones; each of you writes on your own phone; sealed answers genuinely never
-appear on the other device; the moment the second answer is sealed, both open on
-both screens.
+From then on you're synced — and because you're each signed in, either of you can
+open the app on any device, sign in, and land right back in your room with no
+code. One of you draws the day's question and it appears on both phones; each
+writes on their own phone; sealed answers genuinely never appear on the other
+device; the moment the second answer is sealed, both open on both screens.
 
 ## Good to know
 
@@ -74,9 +95,11 @@ both screens.
 - **Offline:** the app caches itself and your room locally; answers written
   offline sync when you reconnect. Drawing a new question needs a connection
   (it's coordinated between the phones).
-- **The room code** lives at the bottom of the app on a paired phone. "Leave on
-  this phone" only disconnects that device — the room and all answers stay in
-  your Firebase project, and you can rejoin with the code.
+- **Signing out / new devices:** "Sign out" (bottom of the app) just ends this
+  device's session — your room and all answers stay safe. Sign back in with the
+  same Google account on any device and you land right back in your room; no code
+  needed. The room code is only for the one-time pairing, and still lives at the
+  bottom of the app if you ever need to re-share it.
 - **Editing questions:** `questions.js`, same as before. You can now add, remove,
   reorder, or re-theme questions any time and saved answers stay attached — each
   question is keyed by a hash of its text. The one exception: **rewording** a

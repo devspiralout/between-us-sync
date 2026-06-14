@@ -1,6 +1,6 @@
 // Between Us (sync) — cache the app shell + fonts. NEVER intercept Firestore
 // traffic: a cache-first response would freeze live sync.
-const CACHE = "between-us-sync-v8";
+const CACHE = "between-us-sync-v10";
 const SHELL = ["./", "./index.html", "./style.css", "./app.js", "./questions.js", "./firebase-config.js", "./manifest.json", "./icon-192.png", "./icon-512.png"];
 
 self.addEventListener("install", (e) => {
