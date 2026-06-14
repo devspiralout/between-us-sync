@@ -93,6 +93,7 @@ let roomResolved = false;  // have we finished deciding which room this account 
 let pendingRoom = null;    // a code from a ?room= link, waiting for sign-in
 let ui = { view: "today", picking: false, drawingMore: false, editing: false, joinStep: null, joinNames: null, joinCode: null, online: true };
 let lastSig = null; // signature of the last thing we rendered, to skip no-op re-renders
+let editDraft = null; // { qid, text } — an in-progress answer, kept alive across re-renders
 const seenCards = new Set(); // today's card ids we've already shown, so each animates in only once
 
 const roomRef = () => doc(db, "rooms", local.code);
@@ -128,22 +129,11 @@ function subscribe() {
     if (!state.tz && local && local.who === "a") {
       updateDoc(roomRef(), { tz: localTz() }).catch(() => {});
     }
-    healReveals();
     render();
   }, (err) => {
     console.error(err);
     toast("Lost connection to the room — check SETUP.md step 3 (rules) if this persists.");
   });
-}
-
-// if both answers exist but revealed never got set (e.g. both sealed at the
-// same moment on different phones), either device repairs it
-function healReveals() {
-  for (const [qid, n] of Object.entries(state.notes || {})) {
-    if (n && n.a && n.b && !n.revealed) {
-      updateDoc(roomRef(), { [`notes.${qid}.revealed`]: true, [`notes.${qid}.revealedAt`]: Date.now() }).catch(() => {});
-    }
-  }
 }
 
 // One-time upgrade for rooms created before stable ids: positional int id `i` is
@@ -381,6 +371,7 @@ async function reveal(theme) {
 
 async function sealAnswer(qid, text) {
   const draft = text.trim();
+  editDraft = { qid, text: draft }; // so the error path can repopulate the box
   // Leave edit mode BEFORE the write. Firestore applies the write to the local
   // cache and fires the snapshot optimistically; if we were still in edit mode at
   // that point it would rebuild the open textarea (one flicker) and then rebuild
@@ -396,6 +387,7 @@ async function sealAnswer(qid, text) {
     render();
     return;
   }
+  editDraft = null; // sealed successfully — drop the working copy
   render();
 }
 
@@ -443,11 +435,14 @@ function answersHtml(qid) {
 
   // writing mode (always writing as yourself on this device)
   if (ui.editing === qid) {
+    // preserve what's being typed across re-renders (e.g. partner just wrote
+    // something), instead of falling back to the last saved value
+    const draftVal = (editDraft && editDraft.qid === qid) ? editDraft.text : (n[me] || "");
     return `
       <div class="rise">
         <p class="player-label" style="color:var(--amber); margin-bottom:8px">Just you — ${esc(theirName)} can't see this yet</p>
         <textarea id="draft-${qid}" rows="4"
-          placeholder="Sealed until you've both answered…">${esc(n[me] || "")}</textarea>
+          placeholder="Sealed until you've both answered…">${esc(draftVal)}</textarea>
         <div style="display:flex; gap:12px; margin-top:10px; align-items:center">
           <button class="btn-small seal-action" data-action="seal" data-qid="${qid}">Seal your answer</button>
           <button class="btn-ghost" data-action="cancel-edit">cancel</button>
@@ -473,6 +468,16 @@ function answersHtml(qid) {
                : `<p class="hint" style="margin-top:4px">hasn't written one</p>`}
            </div>`;
     return block(me, myName, myColor, true) + block(them, theirName, theirColor, false);
+  }
+
+  // both have answered, but not opened yet — hold for the reveal (the suspense)
+  if (n[me] && n[them]) {
+    return `
+      <p class="hint">You've both answered. Open them together whenever you're ready.</p>
+      <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center">
+        <button class="btn-small seal-action" data-action="reveal-both" data-qid="${qid}">✦ Reveal both answers</button>
+        <button class="btn-ghost" data-action="edit" data-qid="${qid}">rewrite mine</button>
+      </div>`;
   }
 
   // sealed / waiting
@@ -723,6 +728,12 @@ function render() {
   if (sig === lastSig) return;
   lastSig = sig;
 
+  // Before we tear down the DOM, grab the text/caret of an open answer box so a
+  // re-render (e.g. the partner just wrote something) doesn't wipe what you're typing.
+  let caretPos = null;
+  const taPrev = app.querySelector("textarea");
+  if (taPrev && ui.editing !== false) { editDraft = { qid: ui.editing, text: taPrev.value }; caretPos = taPrev.selectionStart; }
+
   if (!configured) { app.innerHTML = configMissingView(); return; }
   if (!authReady) { app.innerHTML = loadingView("…"); return; }
   if (!user) { app.innerHTML = signedOutView(); return; }
@@ -753,7 +764,10 @@ function render() {
       <button class="btn-ghost" style="font-size:11.5px" data-action="sign-out">sign out</button>
     </p>`;
   const ta = app.querySelector("textarea");
-  if (ta && ui.editing !== false) ta.focus();
+  if (ta && ui.editing !== false) {
+    ta.focus();
+    if (caretPos != null) { try { ta.setSelectionRange(caretPos, caretPos); } catch (e) {} }
+  }
 }
 
 // Subtle "working…" state for buttons that hit the network: dim + pulse and lock
@@ -793,7 +807,7 @@ app.addEventListener("click", (e) => {
     case "sign-out":
       if (window.confirm("Sign out on this device? Your room and all your answers stay safe — sign back in any time, on any device, to return. No code needed.")) signOutUser();
       break;
-    case "nav": ui.view = view; ui.editing = false; render(); break;
+    case "nav": ui.view = view; ui.editing = false; editDraft = null; render(); break;
     case "reveal": withBusy(btn, () => reveal()); break;
     case "reveal-theme": withBusy(btn, () => reveal(theme)); break;
     case "start-picking": ui.picking = true; render(); break;
@@ -801,8 +815,8 @@ app.addEventListener("click", (e) => {
     case "start-drawing": ui.drawingMore = true; render(); break;
     case "stop-drawing": ui.drawingMore = false; render(); break;
     case "fav": toggleFav(qid); break;
-    case "edit": ui.editing = qid; render(); break;
-    case "cancel-edit": ui.editing = false; render(); break;
+    case "edit": editDraft = null; ui.editing = qid; render(); break;
+    case "cancel-edit": ui.editing = false; editDraft = null; render(); break;
     case "seal": {
       const text = document.getElementById(`draft-${qid}`).value;
       if (!text.trim()) return;
@@ -810,6 +824,7 @@ app.addEventListener("click", (e) => {
       break;
     }
     case "reveal-early": withBusy(btn, () => revealEarly(qid)); break;
+    case "reveal-both": withBusy(btn, () => revealEarly(qid)); break;
   }
 });
 
