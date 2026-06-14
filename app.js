@@ -114,10 +114,10 @@ function leaveRoom() {
 }
 
 // ——— actions (all writes go to Firestore; the snapshot re-renders) ———
-async function createRoom(nameA, nameB, who) {
+async function createRoom(name) {
   const code = makeCode();
   const fresh = {
-    names: { a: nameA, b: nameB },
+    names: { a: name, b: "" }, // partner fills in their own name when they join
     order: shuffle(Q.map((q) => q.id)),
     pos: 0,
     cycle: 1,
@@ -129,7 +129,7 @@ async function createRoom(nameA, nameB, who) {
   };
   try {
     await setDoc(doc(db, "rooms", code), fresh);
-    local = { code, who };
+    local = { code, who: "a" };
     localStorage.setItem(LOCAL_KEY, JSON.stringify(local));
     ui.joinStep = "share"; // show the code once, prominently
     subscribe();
@@ -148,7 +148,9 @@ async function lookupRoom(code) {
     }
     ui.joinCode = code;
     ui.joinNames = snap.data().names;
-    ui.joinStep = "whoami";
+    // fresh room: partner slot still empty → newcomer just names themselves (they're b).
+    // already-claimed room: this is someone re-joining → let them pick which one they are.
+    ui.joinStep = ui.joinNames.b ? "whoami" : "name";
     render();
   } catch (e) {
     console.error(e);
@@ -158,6 +160,21 @@ async function lookupRoom(code) {
 
 function joinAs(who) {
   local = { code: ui.joinCode, who };
+  localStorage.setItem(LOCAL_KEY, JSON.stringify(local));
+  ui.joinStep = null;
+  subscribe();
+}
+
+// newcomer joining a fresh room: they take slot b and write their own name
+async function joinAsNew(name) {
+  try {
+    await updateDoc(doc(db, "rooms", ui.joinCode), { "names.b": name.trim() || "Your partner" });
+  } catch (e) {
+    console.error(e);
+    toast("Couldn't save your name — try again.");
+    return;
+  }
+  local = { code: ui.joinCode, who: "b" };
   localStorage.setItem(LOCAL_KEY, JSON.stringify(local));
   ui.joinStep = null;
   subscribe();
@@ -250,7 +267,7 @@ function answersHtml(qid) {
   const me = local.who;
   const them = me === "a" ? "b" : "a";
   const myName = state.names[me];
-  const theirName = state.names[them];
+  const theirName = state.names[them] || "Your partner";
   const myColor = me === "a" ? "var(--amber)" : "var(--rose)";
   const theirColor = me === "a" ? "var(--rose)" : "var(--amber)";
   const n = (state.notes || {})[qid] || {};
@@ -338,17 +355,23 @@ function welcomeView() {
       <div class="setup-wrap">
         <div class="setup rise">
           <h1 class="bu-serif">Start your room</h1>
-          <p>Enter both names, then say which one is you — this phone will be theirs.</p>
-          <label class="player-label" style="color:var(--amber)">First name</label>
+          <p>What's your name? You'll get a link to send your partner — they'll add their own name when they join.</p>
+          <label class="player-label" style="color:var(--amber)">Your name</label>
           <input type="text" id="name-a" placeholder="e.g. Sam" autocomplete="off">
-          <label class="player-label" style="color:var(--rose)">Second name</label>
-          <input type="text" id="name-b" placeholder="e.g. Alex" autocomplete="off">
-          <label class="player-label" style="color:var(--faded)">This phone belongs to</label>
-          <div style="display:flex; gap:10px; margin-top:4px">
-            <button class="btn-small" id="who-a" data-action="pick-who" data-who="a">the first</button>
-            <button class="btn-small" id="who-b" data-action="pick-who" data-who="b">the second</button>
-          </div>
           <button class="btn-primary" data-action="create-room">Create our room</button>
+          <button class="btn-ghost" style="display:block; margin:14px auto 0" data-action="back-welcome">back</button>
+        </div>
+      </div>`;
+  }
+  if (ui.joinStep === "name") {
+    return `
+      <div class="setup-wrap">
+        <div class="setup rise">
+          <h1 class="bu-serif">You're in.</h1>
+          <p>Last thing — what's your name? ${esc(ui.joinNames.a)} will see it.</p>
+          <label class="player-label" style="color:var(--rose)">Your name</label>
+          <input type="text" id="join-name" placeholder="e.g. Alex" autocomplete="off">
+          <button class="btn-primary" data-action="join-name">Join ${esc(ui.joinNames.a)}</button>
           <button class="btn-ghost" style="display:block; margin:14px auto 0" data-action="back-welcome">back</button>
         </div>
       </div>`;
@@ -397,12 +420,12 @@ function shareCodeView() {
     <div class="setup-wrap">
       <div class="setup rise" style="text-align:center">
         <h1 class="bu-serif">Your room is ready.</h1>
-        <p>Have ${esc(state.names[local.who === "a" ? "b" : "a"])} open the app on their phone,
-        tap "Join with a code", and enter:</p>
-        <p class="bu-serif" style="font-size:28px; font-style:normal; letter-spacing:0.08em; color:var(--amber); margin:6px 0 4px">${prettyCode(local.code)}</p>
-        <button class="btn-ghost" data-action="copy-code">copy code</button>
-        <p style="margin-top:18px">This code is the key to the room — share it only with them.
-        It also lives at the bottom of the app if you need it again.</p>
+        <p>Send your partner the link to join — or read them the code below.</p>
+        <button class="btn-primary" data-action="share-link">Share the join link</button>
+        <p class="bu-serif" style="font-size:28px; font-style:normal; letter-spacing:0.08em; color:var(--amber); margin:16px 0 4px">${prettyCode(local.code)}</p>
+        <button class="btn-ghost" data-action="copy-code">copy code instead</button>
+        <p style="margin-top:18px">The link and code are the key to the room — share them only with them.
+        The code also lives at the bottom of the app if you need it again.</p>
         <button class="btn-primary" data-action="dismiss-share">To today's question</button>
       </div>
     </div>`;
@@ -491,18 +514,18 @@ app.addEventListener("click", (e) => {
   if (!btn) return;
   const { action, qid, theme, view, who } = btn.dataset;
   switch (action) {
-    case "show-create": ui.joinStep = "create"; ui.pickedWho = "a"; render(); markWho(); break;
+    case "show-create": ui.joinStep = "create"; render(); break;
     case "show-join": ui.joinStep = "join"; render(); break;
     case "back-welcome": ui.joinStep = null; render(); break;
-    case "pick-who": ui.pickedWho = who; markWho(); break;
     case "create-room": {
-      const a = document.getElementById("name-a").value.trim() || "Player one";
-      const b = document.getElementById("name-b").value.trim() || "Player two";
-      createRoom(a, b, ui.pickedWho || "a");
+      const name = document.getElementById("name-a").value.trim() || "You";
+      createRoom(name);
       break;
     }
     case "lookup": lookupRoom(cleanCode(document.getElementById("join-code").value)); break;
     case "join-as": joinAs(who); break;
+    case "join-name": joinAsNew(document.getElementById("join-name").value); break;
+    case "share-link": shareJoin(); break;
     case "copy-code": navigator.clipboard?.writeText(prettyCode(local.code)).then(() => toast("Copied.")); break;
     case "dismiss-share": ui.joinStep = null; render(); break;
     case "leave":
@@ -528,12 +551,18 @@ app.addEventListener("click", (e) => {
   }
 });
 
-function markWho() {
-  const a = document.getElementById("who-a");
-  const b = document.getElementById("who-b");
-  if (!a || !b) return;
-  a.classList.toggle("sealed", ui.pickedWho === "a");
-  b.classList.toggle("sealed", ui.pickedWho !== "a");
+// build a deep link the partner can tap to land straight on the join screen
+function joinUrl() {
+  return `${location.origin}${location.pathname}?room=${local.code}`;
+}
+function shareJoin() {
+  const url = joinUrl();
+  const text = `Join me on Between Us — one question a day, answered apart, revealed together. Tap to join: ${url}`;
+  if (navigator.share) {
+    navigator.share({ title: "Between Us", text, url }).catch(() => {});
+  } else {
+    navigator.clipboard?.writeText(url).then(() => toast("Join link copied."));
+  }
 }
 
 // roll the day over when the app returns from the background
@@ -543,4 +572,13 @@ document.addEventListener("visibilitychange", () => {
 
 // ——— boot ———
 if (configured && local) subscribe();
+
+// opened from a shared "?room=CODE" link, and not already in a room?
+// look the room up so we land on the name/whoami step, then clean the URL.
+const urlRoom = new URLSearchParams(location.search).get("room");
+if (configured && !local && urlRoom) {
+  lookupRoom(cleanCode(urlRoom));
+  history.replaceState(null, "", location.pathname);
+}
+
 render();
