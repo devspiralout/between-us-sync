@@ -41,7 +41,7 @@ header {
 header h1 { font-family: 'Cormorant Garamond', Georgia, serif; font-size: 21px; font-weight: 500; font-style: italic; }
 .streak { font-size: 12px; color: var(--amber); letter-spacing: 0.08em; }
 
-nav { display: flex; gap: 22px; margin: 14px 0 8px; }
+nav { display: flex; flex-wrap: wrap; gap: 16px; margin: 14px 0 8px; }
 nav button {
   background: none; border: none; font-family: inherit; font-size: 13px;
   letter-spacing: 0.12em; text-transform: uppercase; padding: 6px 2px;
@@ -138,6 +138,10 @@ button:focus-visible { outline: 2px solid var(--amber); outline-offset: 3px; }
 .setup p { font-size: 13.5px; color: var(--faded); line-height: 1.55; margin-bottom: 22px; }
 .setup label { display: block; margin: 16px 0 6px; }
 .setup .btn-primary { width: 100%; margin-top: 24px; }
+
+.archive-intro { font-size: 12px; color: var(--dim); text-align: center; letter-spacing: 0.06em; text-transform: uppercase; margin: 2px 0 22px; }
+.archive-date { font-family: "Cormorant Garamond", serif; font-style: italic; font-size: 16px; color: var(--faded); letter-spacing: 0.03em; margin: 30px 0 10px; }
+.archive-date:first-of-type { margin-top: 4px; }
 
 .empty { text-align: center; padding-top: 70px; }
 .empty .lead { font-style: italic; font-size: 22px; color: var(--faded); }

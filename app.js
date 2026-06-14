@@ -98,7 +98,7 @@ function subscribe() {
 function healReveals() {
   for (const [qid, n] of Object.entries(state.notes || {})) {
     if (n && n.a && n.b && !n.revealed) {
-      updateDoc(roomRef(), { [`notes.${qid}.revealed`]: true }).catch(() => {});
+      updateDoc(roomRef(), { [`notes.${qid}.revealed`]: true, [`notes.${qid}.revealedAt`]: Date.now() }).catch(() => {});
     }
   }
 }
@@ -232,7 +232,7 @@ async function sealAnswer(qid, text) {
 
 async function revealEarly(qid) {
   try {
-    await updateDoc(roomRef(), { [`notes.${qid}.revealed`]: true });
+    await updateDoc(roomRef(), { [`notes.${qid}.revealed`]: true, [`notes.${qid}.revealedAt`]: Date.now() });
   } catch (e) { toast("Couldn't open it just now — try again."); }
 }
 
@@ -478,6 +478,31 @@ function keptView() {
   return favs.map((id) => cardHtml(Q[id], false)).join("");
 }
 
+// Our Story — every question you've both opened, newest first. Notes carry a
+// revealedAt timestamp from the moment they opened; older notes from before
+// that field existed have no date and fall to the bottom in draw order.
+function archiveView() {
+  const notes = state.notes || {};
+  const entries = Object.keys(notes)
+    .filter((qid) => notes[qid] && notes[qid].revealed && Q[Number(qid)])
+    .map((qid) => ({ id: Number(qid), at: notes[qid].revealedAt || 0 }));
+  if (entries.length === 0) {
+    return `
+      <div class="empty">
+        <p class="lead bu-serif">Your story starts here.</p>
+        <p>Every question you both answer opens and stays — a growing record of
+        the two of you, kept on both your phones.</p>
+      </div>`;
+  }
+  const orderIndex = new Map((state.order || []).map((id, i) => [id, i]));
+  entries.sort((x, y) => (y.at - x.at) || ((orderIndex.get(y.id) ?? -1) - (orderIndex.get(x.id) ?? -1)));
+  const fmt = (ms) => new Date(ms).toLocaleDateString(undefined, { month: "long", day: "numeric", year: "numeric" });
+  return `<p class="archive-intro">${entries.length} ${entries.length === 1 ? "question" : "questions"} answered together · newest first</p>` +
+    entries.map((e) =>
+      `${e.at ? `<p class="archive-date">${fmt(e.at)}</p>` : ""}${cardHtml(Q[e.id], false)}`
+    ).join("");
+}
+
 function render() {
   if (!configured) { app.innerHTML = configMissingView(); return; }
   if (!local) { app.innerHTML = welcomeView(); return; }
@@ -490,6 +515,8 @@ function render() {
   const streak = state.streak.count > 0
     ? `<span class="streak">✦ ${state.streak.count} ${state.streak.count === 1 ? "day" : "days"} in a row</span>` : "";
   const keptLabel = `Kept${(state.favs || []).length ? ` · ${state.favs.length}` : ""}`;
+  const storyCount = Object.values(state.notes || {}).filter((n) => n && n.revealed).length;
+  const storyLabel = `Our Story${storyCount ? ` · ${storyCount}` : ""}`;
   app.innerHTML = `
     <header>
       <h1>Between Us</h1>
@@ -497,9 +524,10 @@ function render() {
     </header>
     <nav>
       <button class="${ui.view === "today" ? "active" : ""}" data-action="nav" data-view="today">Today</button>
+      <button class="${ui.view === "story" ? "active" : ""}" data-action="nav" data-view="story">${storyLabel}</button>
       <button class="${ui.view === "kept" ? "active" : ""}" data-action="nav" data-view="kept">${keptLabel}</button>
     </nav>
-    <main>${ui.view === "today" ? todayView() : keptView()}</main>
+    <main>${ui.view === "today" ? todayView() : ui.view === "story" ? archiveView() : keptView()}</main>
     <p class="progress-line" style="margin:0 0 18px">
       ${ui.online ? "" : "offline — changes will sync when you're back · "}you're ${esc(state.names[local.who])} · room ${prettyCode(local.code)} ·
       <button class="btn-ghost" style="font-size:11.5px" data-action="leave">leave on this phone</button>
