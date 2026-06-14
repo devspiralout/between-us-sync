@@ -96,6 +96,12 @@ function subscribe() {
       app.innerHTML = `<div class="setup-wrap"><p class="bu-serif" style="font-style:italic; font-size:18px; color:var(--dim)">Updating your room… this takes a moment and needs a connection.</p></div>`;
       return;
     }
+    // The creator waits on the share-code screen; the moment their partner joins
+    // (fills in their name) drop them straight into the room too.
+    if (ui.joinStep === "share" && state.names && state.names.b) {
+      ui.joinStep = null;
+      toast(`${state.names.b} joined — you're connected.`);
+    }
     healReveals();
     render();
   }, (err) => {
