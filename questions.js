@@ -153,17 +153,38 @@ const QUESTION_BANK = {
   ],
 };
 
-// Flatten into the runtime list. IMPORTANT: ids are positional, so if you
-// edit questions, progress notes attach by position — fine for rewording,
-// but if you reorder/delete after starting, past notes may shift. Best to
-// finalize the bank before you begin (or accept a fresh start).
+// Each question's id is a stable hash of its TEXT, not its position. That means
+// you can freely add, remove, reorder, or move questions between themes and every
+// saved answer stays attached to the right question. The one thing that changes a
+// question's id is editing its wording — a reworded question is treated as a new
+// one (its old answers stay in the bank under the old text but won't reattach).
+// FNV-1a, 32-bit → 8 hex chars, prefixed "q" so ids are never bare numbers.
+function stableId(text) {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < text.length; i++) {
+    h ^= text.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return "q" + (h >>> 0).toString(16).padStart(8, "0");
+}
+
 const Q = [];
+const QById = {};
+const seenIds = new Set();
 for (const [theme, list] of Object.entries(QUESTION_BANK)) {
-  for (const text of list) Q.push({ id: Q.length, theme, text });
+  for (const text of list) {
+    let id = stableId(text);
+    while (seenIds.has(id)) id += "x"; // astronomically unlikely hash clash; keep ids unique & deterministic
+    seenIds.add(id);
+    const q = { id, theme, text };
+    Q.push(q);
+    QById[id] = q;
+  }
 }
 const TOTAL = Q.length;
 
 // expose to the module-based app
 window.THEMES = THEMES;
 window.Q = Q;
+window.QById = QById;
 window.TOTAL = TOTAL;

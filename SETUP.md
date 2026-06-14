@@ -77,8 +77,11 @@ both screens.
 - **The room code** lives at the bottom of the app on a paired phone. "Leave on
   this phone" only disconnects that device — the room and all answers stay in
   your Firebase project, and you can rejoin with the code.
-- **Editing questions:** `questions.js`, same as before. Settle the bank before
-  starting if you can; reordering mid-game can shift which answers attach where.
+- **Editing questions:** `questions.js`, same as before. You can now add, remove,
+  reorder, or re-theme questions any time and saved answers stay attached — each
+  question is keyed by a hash of its text. The one exception: **rewording** a
+  question changes its key, so its old answers stay in the bank under the old
+  wording rather than following the edit.
 - **Deleting everything:** Firebase console → Firestore Database → delete the
   room document (or the whole project). It's your database; nothing is stored
   anywhere else.

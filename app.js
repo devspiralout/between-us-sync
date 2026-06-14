@@ -14,7 +14,8 @@ import {
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import { firebaseConfig } from "./firebase-config.js";
 
-const { Q, TOTAL, THEMES } = window;
+const { Q, QById, TOTAL, THEMES } = window;
+const SCHEMA = 2; // 2 = stable text-hash question ids (1 = legacy positional ints)
 const app = document.getElementById("app");
 const LOCAL_KEY = "between-us:sync"; // { code, who } — this device's identity only
 
@@ -85,6 +86,14 @@ function subscribe() {
     }
     state = snap.data();
     ui.online = !snap.metadata.fromCache;
+    // A room from before stable ids stores everything under positional ints, which
+    // this version can't index. Convert it once (needs a connection), and hold the
+    // room screen back until it's done so nobody writes a mix of old & new ids.
+    if ((state.schema || 1) < SCHEMA) {
+      migrateToStableIds();
+      app.innerHTML = `<div class="setup-wrap"><p class="bu-serif" style="font-style:italic; font-size:18px; color:var(--dim)">Updating your room… this takes a moment and needs a connection.</p></div>`;
+      return;
+    }
     healReveals();
     render();
   }, (err) => {
@@ -100,6 +109,34 @@ function healReveals() {
     if (n && n.a && n.b && !n.revealed) {
       updateDoc(roomRef(), { [`notes.${qid}.revealed`]: true, [`notes.${qid}.revealedAt`]: Date.now() }).catch(() => {});
     }
+  }
+}
+
+// One-time upgrade for rooms created before stable ids: positional int id `i` is
+// exactly the question at index i in the (unchanged) bank, so Q[i].id is its new
+// stable id. Done in a transaction guarded by the schema field so two phones can't
+// double-run it; if offline/contended it simply retries on the next snapshot.
+async function migrateToStableIds() {
+  try {
+    await runTransaction(db, async (tx) => {
+      const snap = await tx.get(roomRef());
+      if (!snap.exists()) return;
+      const s = snap.data();
+      if ((s.schema || 1) >= SCHEMA) return; // already migrated by the other device
+      const idOf = (i) => (Q[i] ? Q[i].id : null);
+      const notes = {};
+      for (const [k, v] of Object.entries(s.notes || {})) {
+        const id = idOf(Number(k));
+        if (id) notes[id] = v;
+      }
+      const favs = [...new Set((s.favs || []).map(idOf).filter(Boolean))];
+      const order = (s.order || []).map(idOf).filter(Boolean);
+      const today = s.today || { date: todayKey(), cards: [] };
+      const cards = (today.cards || []).map(idOf).filter(Boolean);
+      tx.update(roomRef(), { notes, favs, order, today: { ...today, cards }, schema: SCHEMA });
+    });
+  } catch (e) {
+    console.error("id migration deferred (will retry on next sync):", e);
   }
 }
 
@@ -126,6 +163,7 @@ async function createRoom(name) {
     favs: [],
     notes: {},
     created: todayKey(),
+    schema: SCHEMA,
   };
   try {
     await setDoc(doc(db, "rooms", code), fresh);
@@ -196,7 +234,7 @@ async function reveal(theme) {
         cycle += 1;
       }
       if (theme) {
-        const idx = order.slice(pos).findIndex((id) => Q[id].theme === theme);
+        const idx = order.slice(pos).findIndex((id) => QById[id] && QById[id].theme === theme);
         if (idx > 0) {
           order = [...order];
           const [picked] = order.splice(pos + idx, 1);
@@ -449,9 +487,11 @@ function todayView() {
              </div>`}
       </div>`;
   }
-  const cardsHtml = cards.map((id, i) =>
-    cardHtml(Q[id], ui.justRevealed && i === cards.length - 1)
-  ).join("");
+  const cardsHtml = cards
+    .map((id) => QById[id])
+    .filter(Boolean)
+    .map((q, i, arr) => cardHtml(q, ui.justRevealed && i === arr.length - 1))
+    .join("");
   const more = ui.drawingMore
     ? `<p class="hint" style="margin:4px 0 0">From anywhere, or a theme?</p>
        <div style="margin-top:10px"><button class="btn-small" data-action="reveal">Surprise us</button></div>
@@ -475,7 +515,7 @@ function keptView() {
         <p>Tap the heart on a question that lands, and it will live here — on both your phones.</p>
       </div>`;
   }
-  return favs.map((id) => cardHtml(Q[id], false)).join("");
+  return favs.map((id) => QById[id]).filter(Boolean).map((q) => cardHtml(q, false)).join("");
 }
 
 // Our Story — every question you've both opened, newest first. Notes carry a
@@ -484,8 +524,8 @@ function keptView() {
 function archiveView() {
   const notes = state.notes || {};
   const entries = Object.keys(notes)
-    .filter((qid) => notes[qid] && notes[qid].revealed && Q[Number(qid)])
-    .map((qid) => ({ id: Number(qid), at: notes[qid].revealedAt || 0 }));
+    .filter((qid) => notes[qid] && notes[qid].revealed && QById[qid])
+    .map((qid) => ({ id: qid, at: notes[qid].revealedAt || 0 }));
   if (entries.length === 0) {
     return `
       <div class="empty">
@@ -499,7 +539,7 @@ function archiveView() {
   const fmt = (ms) => new Date(ms).toLocaleDateString(undefined, { month: "long", day: "numeric", year: "numeric" });
   return `<p class="archive-intro">${entries.length} ${entries.length === 1 ? "question" : "questions"} answered together · newest first</p>` +
     entries.map((e) =>
-      `${e.at ? `<p class="archive-date">${fmt(e.at)}</p>` : ""}${cardHtml(Q[e.id], false)}`
+      `${e.at ? `<p class="archive-date">${fmt(e.at)}</p>` : ""}${cardHtml(QById[e.id], false)}`
     ).join("");
 }
 
@@ -566,16 +606,16 @@ app.addEventListener("click", (e) => {
     case "stop-picking": ui.picking = false; render(); break;
     case "start-drawing": ui.drawingMore = true; ui.justRevealed = false; render(); break;
     case "stop-drawing": ui.drawingMore = false; render(); break;
-    case "fav": toggleFav(Number(qid)); break;
-    case "edit": ui.editing = Number(qid); ui.justRevealed = false; render(); break;
+    case "fav": toggleFav(qid); break;
+    case "edit": ui.editing = qid; ui.justRevealed = false; render(); break;
     case "cancel-edit": ui.editing = false; render(); break;
     case "seal": {
       const text = document.getElementById(`draft-${qid}`).value;
       if (!text.trim()) return;
-      sealAnswer(Number(qid), text);
+      sealAnswer(qid, text);
       break;
     }
-    case "reveal-early": revealEarly(Number(qid)); break;
+    case "reveal-early": revealEarly(qid); break;
   }
 });
 
