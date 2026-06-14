@@ -352,6 +352,13 @@ async function reveal(theme) {
         order = shuffle(Q.map((q) => q.id));
         pos = 0;
         cycle += 1;
+      } else {
+        // questions added to the bank since this room's order was built aren't in
+        // it yet — mix any newcomers into the not-yet-asked tail (leaving already
+        // asked questions untouched) so they join the rotation right away.
+        const known = new Set(order);
+        const missing = Q.map((q) => q.id).filter((id) => !known.has(id));
+        if (missing.length) order = [...order.slice(0, pos), ...shuffle([...order.slice(pos), ...missing])];
       }
       if (theme) {
         const idx = order.slice(pos).findIndex((id) => QById[id] && QById[id].theme === theme);
