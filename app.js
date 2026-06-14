@@ -23,10 +23,21 @@ const app = document.getElementById("app");
 const LOCAL_KEY = "between-us:sync"; // { code, who } — this device's identity only
 
 // ——— helpers ———
-const todayKey = () => {
-  const d = new Date();
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+// The "day" is anchored to the room's home timezone (set by whoever created it),
+// so two partners in different timezones always agree on what today's question is
+// and when the day rolls over — instead of each device using its own local date.
+const localTz = () => { try { return Intl.DateTimeFormat().resolvedOptions().timeZone; } catch (e) { return "UTC"; } };
+const roomTz = () => (state && state.tz) || localTz();
+const dateKeyInTz = (ms, tz) => {
+  try {
+    return new Intl.DateTimeFormat("en-CA", { timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date(ms));
+  } catch (e) {
+    const d = new Date(ms);
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  }
 };
+const todayKey = () => dateKeyInTz(Date.now(), roomTz());
+const dateKeyOf = (ms) => dateKeyInTz(ms, roomTz());
 const dayBefore = (key) => {
   const [y, m, d] = key.split("-").map(Number);
   const dt = new Date(y, m - 1, d);
@@ -111,6 +122,11 @@ function subscribe() {
     if (ui.joinStep === "share" && state.names && state.names.b) {
       ui.joinStep = null;
       toast(`${state.names.b} joined — you're connected.`);
+    }
+    // Backfill a home timezone on rooms created before this existed — only the
+    // creator writes it, so the two devices can't set conflicting values.
+    if (!state.tz && local && local.who === "a") {
+      updateDoc(roomRef(), { tz: localTz() }).catch(() => {});
     }
     healReveals();
     render();
@@ -259,6 +275,7 @@ async function createRoom(name) {
     notes: {},
     created: todayKey(),
     schema: SCHEMA,
+    tz: localTz(), // the room's home timezone — anchors "today" for both partners
   };
   try {
     await setDoc(doc(db, "rooms", code), fresh);
@@ -346,11 +363,7 @@ async function reveal(theme) {
       }
       const qid = order[pos];
       pos += 1;
-      let streak = s.streak;
-      if (streak.last !== t) {
-        streak = { count: streak.last === dayBefore(t) ? streak.count + 1 : 1, last: t };
-      }
-      tx.update(roomRef(), { order, pos, cycle, streak, today: { date: t, cards: [...today.cards, qid] } });
+      tx.update(roomRef(), { order, pos, cycle, today: { date: t, cards: [...today.cards, qid] } });
     });
   } catch (e) {
     console.error(e);
@@ -675,6 +688,25 @@ function archiveView() {
     ).join("");
 }
 
+// Streak = consecutive days (in the room's timezone, ending today or yesterday)
+// on which a question was *both-answered and opened*. Derived from the revealedAt
+// timestamps so both devices always agree and there's nothing to keep in sync.
+function computeStreak() {
+  const days = new Set();
+  for (const n of Object.values(state.notes || {})) {
+    if (n && n.a && n.b && n.revealedAt) days.add(dateKeyOf(n.revealedAt));
+  }
+  if (!days.size) return 0;
+  let cursor = todayKey();
+  if (!days.has(cursor)) {            // nothing today yet — the streak can still be alive from yesterday
+    cursor = dayBefore(cursor);
+    if (!days.has(cursor)) return 0;
+  }
+  let count = 0;
+  while (days.has(cursor)) { count++; cursor = dayBefore(cursor); }
+  return count;
+}
+
 function render() {
   // Firestore (esp. with metadata changes) fires the snapshot repeatedly with
   // identical data — local write, then server ack. Rebuilding innerHTML each time
@@ -692,8 +724,9 @@ function render() {
   if (!state) { app.innerHTML = loadingView("finding your room…"); return; }
   if (ui.joinStep === "share") { app.innerHTML = shareCodeView(); return; }
 
-  const streak = state.streak.count > 0
-    ? `<span class="streak">✦ ${state.streak.count} ${state.streak.count === 1 ? "day" : "days"} in a row</span>` : "";
+  const sc = computeStreak();
+  const streak = sc > 0
+    ? `<span class="streak">✦ ${sc} ${sc === 1 ? "day" : "days"} in a row</span>` : "";
   const keptLabel = `Kept${(state.favs || []).length ? ` · ${state.favs.length}` : ""}`;
   const storyCount = Object.values(state.notes || {}).filter((n) => n && n.revealed).length;
   const storyLabel = `Our Story${storyCount ? ` · ${storyCount}` : ""}`;
@@ -770,6 +803,21 @@ app.addEventListener("click", (e) => {
       break;
     }
     case "reveal-early": withBusy(btn, () => revealEarly(qid)); break;
+  }
+});
+
+// Enter-to-submit: on a single-line input, Enter fires that screen's primary
+// button; in the multi-line answer box, Enter is a newline, so ⌘/Ctrl+Enter seals.
+app.addEventListener("keydown", (e) => {
+  if (e.key !== "Enter" || e.isComposing) return;
+  const t = e.target;
+  if (t.tagName === "INPUT") {
+    e.preventDefault();
+    const scope = t.closest(".setup") || app;
+    scope.querySelector(".btn-primary[data-action]")?.click();
+  } else if (t.tagName === "TEXTAREA" && (e.metaKey || e.ctrlKey)) {
+    e.preventDefault();
+    app.querySelector('[data-action="seal"]')?.click();
   }
 });
 
