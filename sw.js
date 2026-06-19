@@ -2,7 +2,7 @@
 // network-first (so a new deploy shows up immediately when online, cache only as
 // an offline fallback); fonts and the versioned Firebase SDK are immutable so they
 // stay cache-first. NEVER intercept Firestore traffic — that would freeze live sync.
-const CACHE = "between-us-sync-v16";
+const CACHE = "between-us-sync-v17";
 const SHELL = ["./", "./index.html", "./style.css", "./app.js", "./questions.js", "./firebase-config.js", "./manifest.json", "./icon-192.png", "./icon-512.png"];
 
 self.addEventListener("install", (e) => {
@@ -51,5 +51,35 @@ self.addEventListener("fetch", (e) => {
         return res;
       })
       .catch(() => caches.match(e.request).then((hit) => hit || caches.match("./index.html")))
+  );
+});
+
+// ——— push notifications ———
+// FCM delivers messages here (the token is bound to this service worker). We send
+// data-only messages from the Cloud Function and render the notification ourselves.
+self.addEventListener("push", (e) => {
+  let payload = {};
+  try { payload = e.data ? e.data.json() : {}; } catch (err) { payload = {}; }
+  const d = payload.data || payload.notification || payload || {};
+  const title = d.title || "Between Us";
+  const body = d.body || "";
+  const url = d.url || "./";
+  e.waitUntil(self.registration.showNotification(title, {
+    body,
+    icon: "./icon-192.png",
+    badge: "./icon-192.png",
+    tag: "between-us",
+    data: { url },
+  }));
+});
+
+self.addEventListener("notificationclick", (e) => {
+  e.notification.close();
+  const url = (e.notification.data && e.notification.data.url) || "./";
+  e.waitUntil(
+    self.clients.matchAll({ type: "window", includeUncontrolled: true }).then((cls) => {
+      for (const c of cls) { if (c.url.includes("between-us-sync") && "focus" in c) return c.focus(); }
+      if (self.clients.openWindow) return self.clients.openWindow(url);
+    })
   );
 });

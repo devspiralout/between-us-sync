@@ -22,3 +22,8 @@ export const firebaseConfig = {
   messagingSenderId: "79650974050",
   appId: "1:79650974050:web:8d44b9b1499df53970643b"
 };
+
+// Web Push (notifications) public key. Firebase console → Project settings →
+// Cloud Messaging → "Web Push certificates" → Generate key pair → paste the key
+// string here. Like the config above, this is a PUBLIC key and safe to ship.
+export const vapidKey = "BP_6s_3XItN9c0nnFkvGQ1hzoigLTOkFSLz6bW7EECJ47FRdFPBZq8tKOLx_QMsuki8m9LDTmukuC0C1dez69GE";

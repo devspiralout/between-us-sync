@@ -1,1 +1,4 @@
 .DS_Store
+functions/node_modules/
+*.log
+firebase-debug.log

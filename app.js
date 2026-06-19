@@ -15,7 +15,10 @@ import {
 import {
   getAuth, GoogleAuthProvider, signInWithPopup, signOut as fbSignOut, onAuthStateChanged,
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
-import { firebaseConfig } from "./firebase-config.js";
+import {
+  getMessaging, getToken, isSupported as messagingSupported,
+} from "https://www.gstatic.com/firebasejs/10.12.2/firebase-messaging.js";
+import { firebaseConfig, vapidKey } from "./firebase-config.js";
 
 const { Q, QById, TOTAL, THEMES } = window;
 const SCHEMA = 2; // 2 = stable text-hash question ids (1 = legacy positional ints)
@@ -75,12 +78,19 @@ function toast(msg) {
 
 // ——— firebase ———
 const configured = firebaseConfig.apiKey && !firebaseConfig.apiKey.startsWith("PASTE");
-let db = null, auth = null;
+const pushConfigured = vapidKey && !vapidKey.startsWith("PASTE");
+let db = null, auth = null, messaging = null;
 const provider = new GoogleAuthProvider();
 if (configured) {
   const fbApp = initializeApp(firebaseConfig);
   db = initializeFirestore(fbApp, { localCache: persistentLocalCache() });
   auth = getAuth(fbApp);
+  // notifications are optional and not supported everywhere — set up lazily
+  if (pushConfigured) {
+    messagingSupported().then((ok) => {
+      if (ok) { try { messaging = getMessaging(fbApp); render(); } catch (e) { console.error(e); } }
+    }).catch(() => {});
+  }
 }
 
 // ——— state ———
@@ -404,6 +414,36 @@ async function toggleFav(id) {
   } catch (e) { toast("Couldn't update kept questions — try again."); }
 }
 
+// Ask for notification permission, get this device's push token, and store it on
+// the room under this partner's slot so the Cloud Function can reach them.
+async function enableNotifications() {
+  if (!messaging) { toast("Notifications aren't available on this device or browser."); return; }
+  try {
+    const perm = await Notification.requestPermission();
+    if (perm !== "granted") { toast("Notifications stay off — you can turn them on later."); render(); return; }
+    const reg = await navigator.serviceWorker.ready;
+    const token = await getToken(messaging, { vapidKey, serviceWorkerRegistration: reg });
+    if (!token) { toast("Couldn't register for notifications — try again."); return; }
+    await updateDoc(roomRef(), { [`tokens.${local.who}`]: token });
+    toast("Notifications on — your partner's answers will nudge you.");
+    render();
+  } catch (e) {
+    console.error(e);
+    toast("Couldn't turn on notifications — try again.");
+  }
+}
+
+// the small footer control reflecting notification state for this device
+function notifControl() {
+  if (!messaging || typeof Notification === "undefined") return ""; // unsupported — hide entirely
+  const perm = Notification.permission;
+  if (perm === "denied") return ` · <span style="color:var(--dim)">notifications blocked in settings</span>`;
+  if (perm === "granted" && state.tokens && state.tokens[local.who]) {
+    return ` · <span style="color:var(--sage)">🔔 on</span>`;
+  }
+  return ` · <button class="btn-ghost" style="font-size:11.5px" data-action="enable-notifs">turn on notifications</button>`;
+}
+
 // ——— templates ———
 const heartSvg = (filled) => `
   <svg width="20" height="20" viewBox="0 0 24 24" fill="${filled ? "var(--rose)" : "none"}"
@@ -724,7 +764,8 @@ function render() {
   // identical data — local write, then server ack. Rebuilding innerHTML each time
   // re-creates every node and replays entrance animations, which reads as flicker.
   // If nothing the view depends on changed, skip the rebuild entirely.
-  const sig = JSON.stringify([todayKey(), local, state, ui, user ? user.uid : null, authReady, roomResolved, pendingRoom]);
+  const notifState = (typeof Notification !== "undefined" ? Notification.permission : "") + (messaging ? "+" : "");
+  const sig = JSON.stringify([todayKey(), local, state, ui, user ? user.uid : null, authReady, roomResolved, pendingRoom, notifState]);
   if (sig === lastSig) return;
   lastSig = sig;
 
@@ -760,7 +801,7 @@ function render() {
     </nav>
     <main>${ui.view === "today" ? todayView() : ui.view === "story" ? archiveView() : keptView()}</main>
     <p class="progress-line" style="margin:0 0 18px">
-      ${ui.online ? "" : "offline — changes will sync when you're back · "}you're ${esc(state.names[local.who])} · room ${prettyCode(local.code)} ·
+      ${ui.online ? "" : "offline — changes will sync when you're back · "}you're ${esc(state.names[local.who])} · room ${prettyCode(local.code)}${notifControl()} ·
       <button class="btn-ghost" style="font-size:11.5px" data-action="sign-out">sign out</button>
     </p>`;
   const ta = app.querySelector("textarea");
@@ -804,6 +845,7 @@ app.addEventListener("click", (e) => {
     case "share-link": shareJoin(); break;
     case "copy-code": navigator.clipboard?.writeText(prettyCode(local.code)).then(() => toast("Copied.")); break;
     case "dismiss-share": ui.joinStep = null; render(); break;
+    case "enable-notifs": withBusy(btn, () => enableNotifications()); break;
     case "sign-out":
       if (window.confirm("Sign out on this device? Your room and all your answers stay safe — sign back in any time, on any device, to return. No code needed.")) signOutUser();
       break;
