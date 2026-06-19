@@ -80,11 +80,12 @@ main { width: 100%; max-width: 520px; flex: 1; padding-bottom: 48px; }
 textarea, input[type="text"] {
   width: 100%; background: rgba(0,0,0,0.22);
   border: 1px solid rgba(242,233,220,0.1); border-radius: 10px; padding: 10px 12px;
-  color: var(--parchment); font-size: 14px; line-height: 1.5; font-family: inherit;
+  color: var(--parchment); font-size: 16px; line-height: 1.5; font-family: inherit;
 }
 textarea { resize: vertical; }
 textarea:focus, input:focus { outline: none; border-color: rgba(227,168,111,0.5); }
-input[type="text"] { font-size: 15px; padding: 11px 13px; }
+/* 16px keeps iOS Safari from auto-zooming the page when a field is focused */
+input[type="text"] { font-size: 16px; padding: 11px 13px; }
 
 /* ——— buttons ——— */
 button { cursor: pointer; transition: all 0.2s ease; }
