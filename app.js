@@ -23,6 +23,7 @@ import { firebaseConfig, vapidKey } from "./firebase-config.js";
 const { Q, QById, TOTAL, THEMES } = window;
 const SCHEMA = 2; // 2 = stable text-hash question ids (1 = legacy positional ints)
 const DAILY_LIMIT = 3; // questions you can draw/answer per day
+const REACTIONS = ["❤️", "😍", "🔥", "😂", "🥹", "🙌"]; // quick reactions to an answer
 const app = document.getElementById("app");
 const LOCAL_KEY = "between-us:sync"; // { code, who } — this device's identity only
 
@@ -102,9 +103,10 @@ let user = null;           // signed-in Google account (null = signed out)
 let authReady = false;     // has Firebase reported the initial auth state yet?
 let roomResolved = false;  // have we finished deciding which room this account is in?
 let pendingRoom = null;    // a code from a ?room= link, waiting for sign-in
-let ui = { view: "today", picking: false, pickMode: "draw", editing: false, joinStep: null, joinNames: null, joinCode: null, online: true };
+let ui = { view: "today", picking: false, pickMode: "draw", editing: false, replying: false, joinStep: null, joinNames: null, joinCode: null, online: true };
 let lastSig = null; // signature of the last thing we rendered, to skip no-op re-renders
 let editDraft = null; // { qid, text } — an in-progress answer, kept alive across re-renders
+let replyDraft = null; // { qid, text } — an in-progress reply, kept alive across re-renders
 const seenCards = new Set(); // today's card ids we've already shown, so each animates in only once
 
 const roomRef = () => doc(db, "rooms", local.code);
@@ -462,6 +464,23 @@ async function toggleFav(id) {
   } catch (e) { toast("Couldn't update kept questions — try again."); }
 }
 
+// leave (or toggle off) an emoji reaction on your partner's answer
+async function reactToAnswer(qid, emoji) {
+  const cur = (((state.notes || {})[qid] || {}).react || {})[local.who];
+  const next = cur === emoji ? null : emoji; // tapping the same one clears it
+  try { await updateDoc(roomRef(), { [`notes.${qid}.react.${local.who}`]: next }); }
+  catch (e) { console.error(e); toast("Couldn't react — try again."); }
+}
+
+async function saveReply(qid, text) {
+  const clean = (text || "").trim();
+  replyDraft = null;
+  ui.replying = false;
+  try { await updateDoc(roomRef(), { [`notes.${qid}.reply.${local.who}`]: clean || null }); }
+  catch (e) { console.error(e); toast("Couldn't save your reply — try again."); ui.replying = qid; render(); return; }
+  render();
+}
+
 // Ask for notification permission, get this device's push token, and store it on
 // the room under this partner's slot so the Cloud Function can reach them.
 async function enableNotifications() {
@@ -554,23 +573,60 @@ function answersHtml(qid) {
       </div>`;
   }
 
-  // revealed — both open
+  // revealed — both open, with reactions/replies
   if (n.revealed) {
-    const block = (p, name, color, mine) =>
-      n[p]
-        ? `<div class="answer-block">
-             <div class="answer-head">
-               <span class="player-label" style="color:${color}">${esc(name)}</span>
-               ${mine ? `<button class="btn-ghost" style="font-size:11.5px" data-action="edit" data-qid="${qid}">edit</button>` : ""}
-             </div>
-             <p class="answer-text">${esc(n[p])}</p>
-           </div>`
-        : `<div class="answer-block">
+    const react = n.react || {};
+    const reply = n.reply || {};
+    const block = (p, name, color, mine) => {
+      if (!n[p]) {
+        return `<div class="answer-block">
              <span class="player-label" style="color:var(--dim)">${esc(name)}</span><br>
              ${mine
                ? `<button class="btn-ghost" style="margin-top:4px" data-action="edit" data-qid="${qid}">✎ add yours anyway</button>`
                : `<p class="hint" style="margin-top:4px">hasn't written one</p>`}
            </div>`;
+      }
+      const reactor = p === "a" ? "b" : "a"; // the person who reacts to THIS answer
+      const emoji = react[reactor];
+      const text = reply[reactor];
+      let extra = "";
+      if (reactor === me) {
+        // your reaction/reply to your partner's answer — editable
+        if (ui.replying === qid) {
+          const draftVal = (replyDraft && replyDraft.qid === qid) ? replyDraft.text : (text || "");
+          extra = `<div class="reply-edit rise">
+              <textarea id="reply-${qid}" rows="2" placeholder="Say something back to ${esc(name)}…">${esc(draftVal)}</textarea>
+              <div style="display:flex; gap:10px; margin-top:6px">
+                <button class="btn-small seal-action" data-action="save-reply" data-qid="${qid}">Save</button>
+                <button class="btn-ghost" data-action="cancel-reply">cancel</button>
+              </div>
+            </div>`;
+        } else {
+          const palette = REACTIONS.map((em) =>
+            `<button class="react-btn${emoji === em ? " on" : ""}" data-action="react" data-qid="${qid}" data-emoji="${em}" aria-label="React ${em}">${em}</button>`
+          ).join("");
+          extra = `<div class="reaction-controls">
+              <div class="react-palette">${palette}</div>
+              <button class="btn-ghost" data-action="open-reply" data-qid="${qid}">${text ? "edit reply" : "reply"}</button>
+            </div>
+            ${text ? `<p class="reaction-text">you: ${esc(text)}</p>` : ""}`;
+        }
+      } else if (emoji || text) {
+        // your partner's reaction to your answer — read-only
+        extra = `<div class="reaction">
+            ${emoji ? `<span class="reaction-emoji">${emoji}</span>` : ""}
+            ${text ? `<span class="reaction-text">${esc(text)}</span>` : ""}
+          </div>`;
+      }
+      return `<div class="answer-block">
+           <div class="answer-head">
+             <span class="player-label" style="color:${color}">${esc(name)}</span>
+             ${mine ? `<button class="btn-ghost" style="font-size:11.5px" data-action="edit" data-qid="${qid}">edit</button>` : ""}
+           </div>
+           <p class="answer-text">${esc(n[p])}</p>
+           ${extra}
+         </div>`;
+    };
     return block(me, myName, myColor, true) + block(them, theirName, theirColor, false);
   }
 
@@ -924,11 +980,15 @@ function render() {
   if (sig === lastSig) return;
   lastSig = sig;
 
-  // Before we tear down the DOM, grab the text/caret of an open answer box so a
-  // re-render (e.g. the partner just wrote something) doesn't wipe what you're typing.
+  // Before we tear down the DOM, grab the text/caret of an open answer or reply box
+  // so a re-render (e.g. the partner just wrote something) doesn't wipe what you're typing.
   let caretPos = null;
   const taPrev = app.querySelector("textarea");
-  if (taPrev && ui.editing !== false) { editDraft = { qid: ui.editing, text: taPrev.value }; caretPos = taPrev.selectionStart; }
+  if (taPrev && ui.editing !== false && taPrev.id === `draft-${ui.editing}`) {
+    editDraft = { qid: ui.editing, text: taPrev.value }; caretPos = taPrev.selectionStart;
+  } else if (taPrev && ui.replying && taPrev.id === `reply-${ui.replying}`) {
+    replyDraft = { qid: ui.replying, text: taPrev.value }; caretPos = taPrev.selectionStart;
+  }
 
   if (!configured) { app.innerHTML = configMissingView(); return; }
   if (!authReady) { app.innerHTML = loadingView("…"); return; }
@@ -964,7 +1024,7 @@ function render() {
     <main>${main}</main>
     ${ui.online ? "" : `<p class="progress-line" style="margin:0 0 18px">offline — changes will sync when you're back</p>`}`;
   const ta = app.querySelector("textarea");
-  if (ta && ui.editing !== false) {
+  if (ta && (ui.editing !== false || ui.replying)) {
     ta.focus();
     if (caretPos != null) { try { ta.setSelectionRange(caretPos, caretPos); } catch (e) {} }
   }
@@ -1021,7 +1081,7 @@ app.addEventListener("click", (e) => {
     case "start-repicking": ui.picking = true; ui.pickMode = "redraw"; render(); break;
     case "stop-picking": ui.picking = false; render(); break;
     case "fav": toggleFav(qid); break;
-    case "edit": editDraft = null; ui.editing = qid; render(); break;
+    case "edit": editDraft = null; ui.editing = qid; ui.replying = false; render(); break;
     case "cancel-edit": ui.editing = false; editDraft = null; render(); break;
     case "seal": {
       const text = document.getElementById(`draft-${qid}`).value;
@@ -1031,6 +1091,10 @@ app.addEventListener("click", (e) => {
     }
     case "reveal-early": withBusy(btn, () => revealEarly(qid)); break;
     case "reveal-both": withBusy(btn, () => revealEarly(qid)); break;
+    case "react": reactToAnswer(qid, btn.dataset.emoji); break;
+    case "open-reply": replyDraft = null; ui.replying = qid; ui.editing = false; render(); break;
+    case "cancel-reply": ui.replying = false; replyDraft = null; render(); break;
+    case "save-reply": withBusy(btn, () => saveReply(qid, document.getElementById(`reply-${qid}`).value)); break;
   }
 });
 
@@ -1051,7 +1115,7 @@ app.addEventListener("keydown", (e) => {
     scope.querySelector(".btn-primary[data-action]")?.click();
   } else if (t.tagName === "TEXTAREA" && (e.metaKey || e.ctrlKey)) {
     e.preventDefault();
-    app.querySelector('[data-action="seal"]')?.click();
+    (app.querySelector('[data-action="save-reply"]') || app.querySelector('[data-action="seal"]'))?.click();
   }
 });
 

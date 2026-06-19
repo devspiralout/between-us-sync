@@ -73,9 +73,19 @@ main { width: 100%; max-width: 520px; flex: 1; padding-bottom: 48px; }
 
 .player-label { font-size: 11px; letter-spacing: 0.16em; text-transform: uppercase; font-weight: 600; }
 .answer-text { font-size: 14.5px; line-height: 1.55; margin-top: 5px; white-space: pre-wrap; }
-.answer-block { margin-bottom: 14px; }
+.answer-block { margin-bottom: 18px; }
 .answer-block:last-child { margin-bottom: 0; }
 .answer-head { display: flex; justify-content: space-between; align-items: baseline; }
+
+/* reactions & replies on a revealed answer */
+.reaction-controls { display: flex; align-items: center; gap: 12px; margin-top: 10px; flex-wrap: wrap; }
+.react-palette { display: flex; gap: 4px; flex-wrap: wrap; }
+.react-btn { background: rgba(255,255,255,0.04); border: 1px solid transparent; border-radius: 999px; padding: 4px 8px; font-size: 16px; line-height: 1; }
+.react-btn.on { border-color: rgba(227,168,111,0.55); background: rgba(227,168,111,0.13); }
+.reaction { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
+.reaction-emoji { font-size: 18px; }
+.reaction-text { font-size: 13px; color: var(--faded); line-height: 1.45; margin-top: 6px; }
+.reply-edit { margin-top: 10px; }
 
 textarea, input[type="text"] {
   width: 100%; background: rgba(0,0,0,0.22);

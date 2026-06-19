@@ -22,21 +22,34 @@ exports.notifyOnAnswer = onDocumentUpdated("rooms/{room}", async (event) => {
   const names = after.names || {};
   const tokens = after.tokens || {};
 
-  // find each answer that just appeared and notify the partner who didn't write it
   const sends = [];
   for (const [qid, n] of Object.entries(afterNotes)) {
     const prev = beforeNotes[qid] || {};
+    const react = n.react || {}, preact = prev.react || {};
+    const reply = n.reply || {}, preply = prev.reply || {};
     for (const who of ["a", "b"]) {
+      const other = who === "a" ? "b" : "a";
+      const fromName = names[who] || "Your partner";
+
+      // a fresh answer just appeared → nudge the partner who didn't write it
       if (n[who] && !prev[who]) {
-        const other = who === "a" ? "b" : "a";
         const token = tokens[other];
-        if (!token) continue; // partner hasn't turned on notifications
-        const sealerName = names[who] || "Your partner";
-        const bothIn = Boolean(n.a) && Boolean(n.b);
-        const body = bothIn
-          ? `${sealerName} answered too — you can open tonight's question together.`
-          : `${sealerName} answered today's question — your turn.`;
-        sends.push({ token, body });
+        if (token) {
+          const bothIn = Boolean(n.a) && Boolean(n.b);
+          sends.push({ token, body: bothIn
+            ? `${fromName} answered too — you can open tonight's question together.`
+            : `${fromName} answered today's question — your turn.` });
+        }
+      }
+      // a reaction/reply lands on the OTHER person's answer → notify that author
+      const token = tokens[other];
+      if (token) {
+        if (react[who] && react[who] !== preact[who]) {
+          sends.push({ token, body: `${fromName} reacted ${react[who]} to your answer.` });
+        }
+        if (reply[who] && reply[who] !== preply[who]) {
+          sends.push({ token, body: `${fromName} replied to your answer.` });
+        }
       }
     }
   }
