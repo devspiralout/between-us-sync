@@ -24,6 +24,8 @@ const { Q, QById, TOTAL, THEMES } = window;
 const SCHEMA = 2; // 2 = stable text-hash question ids (1 = legacy positional ints)
 const DAILY_LIMIT = 3; // questions you can draw/answer per day
 const REACTIONS = ["❤️", "😍", "🔥", "😂", "🥹", "🙌"]; // quick reactions to an answer
+THEMES.yours = { label: "Yours", color: "#B98CC9" }; // the couple's own custom questions
+const newCustomId = () => "c" + [...crypto.getRandomValues(new Uint8Array(8))].map((b) => b.toString(16).padStart(2, "0")).join("");
 const app = document.getElementById("app");
 const LOCAL_KEY = "between-us:sync"; // { code, who } — this device's identity only
 
@@ -107,6 +109,7 @@ let ui = { view: "today", picking: false, pickMode: "draw", editing: false, repl
 let lastSig = null; // signature of the last thing we rendered, to skip no-op re-renders
 let editDraft = null; // { qid, text } — an in-progress answer, kept alive across re-renders
 let replyDraft = null; // { qid, text } — an in-progress reply, kept alive across re-renders
+const mergedCustomIds = new Set(); // custom question ids currently merged into QById
 const seenCards = new Set(); // today's card ids we've already shown, so each animates in only once
 
 const roomRef = () => doc(db, "rooms", local.code);
@@ -142,6 +145,7 @@ function subscribe() {
     if (!state.tz && local && local.who === "a") {
       updateDoc(roomRef(), { tz: localTz() }).catch(() => {});
     }
+    syncCustom();
     render();
   }, (err) => {
     console.error(err);
@@ -356,16 +360,17 @@ async function reveal(theme) {
       if (today.cards.length >= DAILY_LIMIT) return;
       const last = today.cards[today.cards.length - 1];
       if (last != null && !(s.notes && s.notes[last] && s.notes[last].revealed)) return;
+      const allIds = [...Q.map((q) => q.id), ...((s.custom || []).map((c) => c.id))];
       if (pos >= order.length) {
-        order = shuffle(Q.map((q) => q.id));
+        order = shuffle(allIds);
         pos = 0;
         cycle += 1;
       } else {
-        // questions added to the bank since this room's order was built aren't in
-        // it yet — mix any newcomers into the not-yet-asked tail (leaving already
-        // asked questions untouched) so they join the rotation right away.
+        // questions added to the deck (bank updates or your own custom ones) since
+        // this room's order was built aren't in it yet — mix any newcomers into the
+        // not-yet-asked tail (leaving already asked questions untouched).
         const known = new Set(order);
-        const missing = Q.map((q) => q.id).filter((id) => !known.has(id));
+        const missing = allIds.filter((id) => !known.has(id));
         if (missing.length) order = [...order.slice(0, pos), ...shuffle([...order.slice(pos), ...missing])];
       }
       if (theme) {
@@ -405,9 +410,10 @@ async function redraw(theme) {
       let { order, pos } = s;
       if (pos < 1 || pos > order.length) return;
       order = [...order];
-      // fold in any newly-added questions first
+      // fold in any newly-added questions (bank or custom) first
+      const allIds = [...Q.map((q) => q.id), ...((s.custom || []).map((c) => c.id))];
       const known = new Set(order);
-      const missing = Q.map((q) => q.id).filter((id) => !known.has(id));
+      const missing = allIds.filter((id) => !known.has(id));
       if (missing.length) order = [...order.slice(0, pos), ...shuffle([...order.slice(pos), ...missing])];
       if (pos >= order.length) return; // nothing left to swap to
       // pick a different not-yet-asked card (optionally matching a theme) and swap
@@ -481,6 +487,47 @@ async function saveReply(qid, text) {
   render();
 }
 
+// merge the room's custom questions into the lookup + theme maps, so cards,
+// archive, and theme draws treat them exactly like bank questions
+function syncCustom() {
+  for (const id of mergedCustomIds) delete QById[id];
+  mergedCustomIds.clear();
+  for (const c of (state && state.custom) || []) {
+    if (c && c.id && c.text) { QById[c.id] = { id: c.id, theme: "yours", text: c.text }; mergedCustomIds.add(c.id); }
+  }
+}
+
+async function addCustom(text) {
+  const clean = (text || "").trim();
+  if (!clean) { toast("Write a question first."); return; }
+  try {
+    await updateDoc(roomRef(), { custom: arrayUnion({ id: newCustomId(), text: clean, by: local.who }) });
+    toast("Added to your deck."); // the snapshot re-renders the list; no explicit render needed
+  } catch (e) { console.error(e); toast("Couldn't add it — try again."); }
+}
+
+// remove a custom question. Guarded to unanswered ones (answered customs stay so
+// they remain in Our Story), and we strip it from the draw order so it can't surface.
+async function removeCustom(id) {
+  try {
+    await runTransaction(db, async (tx) => {
+      const snap = await tx.get(roomRef());
+      const s = snap.data();
+      const note = (s.notes || {})[id];
+      if (note && (note.a || note.b)) return; // answered — keep it
+      const custom = (s.custom || []).filter((c) => c.id !== id);
+      let order = s.order || [];
+      let pos = s.pos || 0;
+      const idx = order.indexOf(id);
+      if (idx !== -1) { order = [...order.slice(0, idx), ...order.slice(idx + 1)]; if (idx < pos) pos -= 1; }
+      const update = { custom, order, pos };
+      const t = todayKey();
+      if (s.today && s.today.date === t) update.today = { ...s.today, cards: (s.today.cards || []).filter((x) => x !== id) };
+      tx.update(roomRef(), update);
+    });
+  } catch (e) { console.error(e); toast("Couldn't remove it — try again."); }
+}
+
 // Ask for notification permission, get this device's push token, and store it on
 // the room under this partner's slot so the Cloud Function can reach them.
 async function enableNotifications() {
@@ -541,10 +588,12 @@ const wordsHtml = (text) =>
 
 const chipsHtml = (action) =>
   `<div class="chips rise">` +
-  Object.entries(THEMES).map(([key, t]) =>
-    `<button class="chip" data-action="${action}" data-theme="${key}"
-       style="border:1px solid ${t.color}44; color:${t.color}">${esc(t.label)}</button>`
-  ).join("") +
+  Object.entries(THEMES)
+    .filter(([key]) => key !== "yours" || (((state && state.custom) || []).length > 0))
+    .map(([key, t]) =>
+      `<button class="chip" data-action="${action}" data-theme="${key}"
+         style="border:1px solid ${t.color}44; color:${t.color}">${esc(t.label)}</button>`
+    ).join("") +
   `</div>`;
 
 function answersHtml(qid) {
@@ -785,6 +834,7 @@ function shareCodeView() {
 function todayView() {
   const t = todayKey();
   const cards = (state.today && state.today.date === t) ? state.today.cards : [];
+  const totalQ = TOTAL + ((state.custom || []).length); // bank + your own questions
 
   // the day's very first draw
   if (cards.length === 0) {
@@ -792,7 +842,7 @@ function todayView() {
       <div class="waiting">
         <div class="glow" aria-hidden="true"></div>
         <p class="lead bu-serif">Today's question is waiting.</p>
-        <p class="count">${DAILY_LIMIT} questions a day · ${state.pos} of ${TOTAL} asked${state.cycle > 1 ? ` · round ${state.cycle}` : ""}</p>
+        <p class="count">${DAILY_LIMIT} questions a day · ${state.pos} of ${totalQ} asked${state.cycle > 1 ? ` · round ${state.cycle}` : ""}</p>
         ${ui.picking
           ? chipsHtml("reveal-theme") +
             `<button class="btn-ghost" style="font-size:13px; margin-top:16px" data-action="stop-picking">never mind — surprise us</button>`
@@ -845,7 +895,7 @@ function todayView() {
     ${cardsHtml}
     <div class="center">
       ${action}
-      <p class="progress-line">${cards.length} of ${DAILY_LIMIT} today · ${state.pos} of ${TOTAL} asked${state.cycle > 1 ? ` · round ${state.cycle}` : ""}</p>
+      <p class="progress-line">${cards.length} of ${DAILY_LIMIT} today · ${state.pos} of ${totalQ} asked${state.cycle > 1 ? ` · round ${state.cycle}` : ""}</p>
     </div>`;
 }
 
@@ -910,8 +960,22 @@ function settingsView() {
     .concat([...Array(24).keys()].map((h) => `<option value="${h}" ${h === rh ? "selected" : ""}>${hourLabel(h)}</option>`))
     .join("");
 
+  const custom = state.custom || [];
+  const customList = custom.length
+    ? custom.map((c) => {
+        const note = (state.notes || {})[c.id] || {};
+        const answered = Boolean(note.a || note.b);
+        return `<div class="custom-item">
+            <span class="custom-text">${esc(c.text)}</span>
+            ${answered
+              ? `<span class="hint" style="white-space:nowrap">in Our Story</span>`
+              : `<button class="btn-ghost custom-remove" data-action="remove-custom" data-id="${c.id}" aria-label="Remove">×</button>`}
+          </div>`;
+      }).join("")
+    : `<p class="hint">None yet. Add a question only the two of you would ask.</p>`;
+
   return `
-    <div class="settings-screen rise">
+    <div class="settings-screen">
       <div class="settings-head">
         <h2 class="bu-serif">Settings</h2>
         <button class="btn-ghost" data-action="close-settings">done</button>
@@ -934,6 +998,16 @@ function settingsView() {
         <label class="player-label">Daily reminder</label>
         <p class="hint" style="margin:6px 0 8px">A nudge if you haven't drawn the day's question, in your room's timezone.</p>
         <select id="set-remind" data-action="set-remind">${opts}</select>
+      </section>
+
+      <section class="set-block">
+        <label class="player-label">Your questions</label>
+        <p class="hint" style="margin:6px 0 8px">Add your own — they mix into the deck under the “Yours” theme, for both of you.</p>
+        <div style="display:flex; gap:8px">
+          <input type="text" id="custom-q" placeholder="e.g. What first made you trust me?" autocomplete="off" style="flex:1">
+          <button class="btn-small" data-action="add-custom">Add</button>
+        </div>
+        <div class="custom-list">${customList}</div>
       </section>
 
       <section class="set-block">
@@ -1067,6 +1141,8 @@ app.addEventListener("click", (e) => {
     case "open-settings": ui.view = "settings"; ui.editing = false; ui.picking = false; render(); break;
     case "close-settings": ui.view = "today"; render(); break;
     case "save-name": withBusy(btn, () => saveName(document.getElementById("set-name").value)); break;
+    case "add-custom": withBusy(btn, () => addCustom(document.getElementById("custom-q").value)); break;
+    case "remove-custom": withBusy(btn, () => removeCustom(btn.dataset.id)); break;
     case "enable-notifs": withBusy(btn, () => enableNotifications()); break;
     case "disable-notifs": withBusy(btn, () => disableNotifications()); break;
     case "sign-out":
@@ -1111,8 +1187,9 @@ app.addEventListener("keydown", (e) => {
   const t = e.target;
   if (t.tagName === "INPUT") {
     e.preventDefault();
-    const scope = t.closest(".setup") || app;
-    scope.querySelector(".btn-primary[data-action]")?.click();
+    // setup screens have one primary button; settings inputs sit beside their own button
+    const scope = t.closest(".setup") || t.parentElement || app;
+    (scope.querySelector(".btn-primary[data-action]") || scope.querySelector("button[data-action]"))?.click();
   } else if (t.tagName === "TEXTAREA" && (e.metaKey || e.ctrlKey)) {
     e.preventDefault();
     (app.querySelector('[data-action="save-reply"]') || app.querySelector('[data-action="seal"]'))?.click();
