@@ -22,6 +22,7 @@ import { firebaseConfig, vapidKey } from "./firebase-config.js";
 
 const { Q, QById, TOTAL, THEMES } = window;
 const SCHEMA = 2; // 2 = stable text-hash question ids (1 = legacy positional ints)
+const DAILY_LIMIT = 3; // questions you can draw/answer per day
 const app = document.getElementById("app");
 const LOCAL_KEY = "between-us:sync"; // { code, who } — this device's identity only
 
@@ -101,7 +102,7 @@ let user = null;           // signed-in Google account (null = signed out)
 let authReady = false;     // has Firebase reported the initial auth state yet?
 let roomResolved = false;  // have we finished deciding which room this account is in?
 let pendingRoom = null;    // a code from a ?room= link, waiting for sign-in
-let ui = { view: "today", picking: false, drawingMore: false, editing: false, joinStep: null, joinNames: null, joinCode: null, online: true };
+let ui = { view: "today", picking: false, pickMode: "draw", editing: false, joinStep: null, joinNames: null, joinCode: null, online: true };
 let lastSig = null; // signature of the last thing we rendered, to skip no-op re-renders
 let editDraft = null; // { qid, text } — an in-progress answer, kept alive across re-renders
 const seenCards = new Set(); // today's card ids we've already shown, so each animates in only once
@@ -338,9 +339,10 @@ async function joinAsNew(name) {
   render(); // show "finding your room…" right away while the first snapshot loads
 }
 
+// draw a NEW question for today (the first, or the next after the current one is
+// done). Capped at DAILY_LIMIT per day, and you must finish the current card first.
 async function reveal(theme) {
   ui.picking = false;
-  ui.drawingMore = false;
   try {
     await runTransaction(db, async (tx) => {
       const snap = await tx.get(roomRef());
@@ -348,6 +350,10 @@ async function reveal(theme) {
       const t = todayKey();
       let { order, pos, cycle } = s;
       const today = (s.today && s.today.date === t) ? s.today : { date: t, cards: [] };
+      // safety guards (the UI already prevents these, but two phones could race)
+      if (today.cards.length >= DAILY_LIMIT) return;
+      const last = today.cards[today.cards.length - 1];
+      if (last != null && !(s.notes && s.notes[last] && s.notes[last].revealed)) return;
       if (pos >= order.length) {
         order = shuffle(Q.map((q) => q.id));
         pos = 0;
@@ -375,7 +381,49 @@ async function reveal(theme) {
   } catch (e) {
     console.error(e);
     toast("Couldn't draw a question — you need to be online for this one.");
-    render(); // the draw failed; reflect the reset picking/drawing state
+    render(); // the draw failed; reflect the reset picking state
+  }
+}
+
+// swap the current (unanswered) card for a different one, without using up a draw.
+// The replaced question goes back into the not-yet-asked pool so it can return.
+async function redraw(theme) {
+  ui.picking = false;
+  try {
+    await runTransaction(db, async (tx) => {
+      const snap = await tx.get(roomRef());
+      const s = snap.data();
+      const t = todayKey();
+      const today = (s.today && s.today.date === t) ? s.today : { date: t, cards: [] };
+      if (!today.cards.length) return;
+      const lastIdx = today.cards.length - 1;
+      const lastQid = today.cards[lastIdx];
+      const n = (s.notes || {})[lastQid] || {};
+      if (n.a || n.b) return; // already answered — can't redraw it away
+      let { order, pos } = s;
+      if (pos < 1 || pos > order.length) return;
+      order = [...order];
+      // fold in any newly-added questions first
+      const known = new Set(order);
+      const missing = Q.map((q) => q.id).filter((id) => !known.has(id));
+      if (missing.length) order = [...order.slice(0, pos), ...shuffle([...order.slice(pos), ...missing])];
+      if (pos >= order.length) return; // nothing left to swap to
+      // pick a different not-yet-asked card (optionally matching a theme) and swap
+      // it into the just-drawn slot; the old card slides into the future pool.
+      let j = pos + Math.floor(Math.random() * (order.length - pos));
+      if (theme) {
+        const idx = order.slice(pos).findIndex((id) => QById[id] && QById[id].theme === theme);
+        if (idx >= 0) j = pos + idx;
+      }
+      [order[pos - 1], order[j]] = [order[j], order[pos - 1]];
+      const cards = [...today.cards];
+      cards[lastIdx] = order[pos - 1];
+      tx.update(roomRef(), { order, today: { date: t, cards } });
+    });
+  } catch (e) {
+    console.error(e);
+    toast("Couldn't redraw just now — try again.");
+    render();
   }
 }
 
@@ -665,12 +713,14 @@ function shareCodeView() {
 function todayView() {
   const t = todayKey();
   const cards = (state.today && state.today.date === t) ? state.today.cards : [];
+
+  // the day's very first draw
   if (cards.length === 0) {
     return `
       <div class="waiting">
         <div class="glow" aria-hidden="true"></div>
         <p class="lead bu-serif">Today's question is waiting.</p>
-        <p class="count">Question ${Math.min(state.pos + 1, TOTAL)} of ${TOTAL}${state.cycle > 1 ? ` · round ${state.cycle}` : ""}</p>
+        <p class="count">${DAILY_LIMIT} questions a day · ${state.pos} of ${TOTAL} asked${state.cycle > 1 ? ` · round ${state.cycle}` : ""}</p>
         ${ui.picking
           ? chipsHtml("reveal-theme") +
             `<button class="btn-ghost" style="font-size:13px; margin-top:16px" data-action="stop-picking">never mind — surprise us</button>`
@@ -680,6 +730,7 @@ function todayView() {
              </div>`}
       </div>`;
   }
+
   const cardsHtml = cards
     .map((id) => QById[id])
     .filter(Boolean)
@@ -689,17 +740,40 @@ function todayView() {
       return cardHtml(q, isNew);
     })
     .join("");
-  const more = ui.drawingMore
-    ? `<p class="hint" style="margin:4px 0 0">From anywhere, or a theme?</p>
-       <div style="margin-top:10px"><button class="btn-small" data-action="reveal">Surprise us</button></div>
-       ${chipsHtml("reveal-theme")}
-       <button class="btn-ghost" style="margin-top:14px" data-action="stop-drawing">actually, this is enough for tonight</button>`
-    : `<button class="btn-outline" style="margin-top:22px" data-action="start-drawing">Draw another</button>`;
+
+  // what comes next depends on the state of the current (last) card
+  const lastQid = cards[cards.length - 1];
+  const n = (state.notes || {})[lastQid] || {};
+  const answeredAtAll = Boolean(n.a || n.b);
+  const done = Boolean(n.revealed);
+
+  let action;
+  if (!answeredAtAll) {
+    // nobody's committed yet → you can swap this card out (not stack a new one)
+    action = ui.picking
+      ? chipsHtml("redraw-theme") +
+        `<button class="btn-ghost" style="font-size:13px; margin-top:16px" data-action="stop-picking">never mind</button>`
+      : `<button class="btn-outline" style="margin-top:22px" data-action="redraw">↻ Not this one — redraw</button>
+         <button class="btn-ghost" style="display:block; margin:10px auto 0; font-size:13px" data-action="start-repicking">or redraw by theme</button>`;
+  } else if (!done) {
+    // in progress — finish it before the next
+    action = `<p class="hint" style="margin-top:18px">Both answer and reveal this one before the next.</p>`;
+  } else if (cards.length < DAILY_LIMIT) {
+    action = ui.picking
+      ? chipsHtml("reveal-theme") +
+        `<button class="btn-ghost" style="font-size:13px; margin-top:16px" data-action="stop-picking">never mind</button>`
+      : `<button class="btn-outline" style="margin-top:22px" data-action="reveal">Draw the next question</button>
+         <button class="btn-ghost" style="display:block; margin:10px auto 0; font-size:13px" data-action="start-picking">or choose a theme</button>`;
+  } else {
+    action = `<p class="lead bu-serif" style="font-size:19px; margin-top:24px">That's all three for today. ✦</p>
+              <p class="hint" style="text-align:center">Come back tomorrow for the next.</p>`;
+  }
+
   return `
     ${cardsHtml}
     <div class="center">
-      ${more}
-      <p class="progress-line">${state.pos} of ${TOTAL} asked${state.cycle > 1 ? ` · round ${state.cycle}` : ""} — no repeats until you've heard them all</p>
+      ${action}
+      <p class="progress-line">${cards.length} of ${DAILY_LIMIT} today · ${state.pos} of ${TOTAL} asked${state.cycle > 1 ? ` · round ${state.cycle}` : ""}</p>
     </div>`;
 }
 
@@ -852,10 +926,11 @@ app.addEventListener("click", (e) => {
     case "nav": ui.view = view; ui.editing = false; editDraft = null; render(); break;
     case "reveal": withBusy(btn, () => reveal()); break;
     case "reveal-theme": withBusy(btn, () => reveal(theme)); break;
-    case "start-picking": ui.picking = true; render(); break;
+    case "redraw": withBusy(btn, () => redraw()); break;
+    case "redraw-theme": withBusy(btn, () => redraw(theme)); break;
+    case "start-picking": ui.picking = true; ui.pickMode = "draw"; render(); break;
+    case "start-repicking": ui.picking = true; ui.pickMode = "redraw"; render(); break;
     case "stop-picking": ui.picking = false; render(); break;
-    case "start-drawing": ui.drawingMore = true; render(); break;
-    case "stop-drawing": ui.drawingMore = false; render(); break;
     case "fav": toggleFav(qid); break;
     case "edit": editDraft = null; ui.editing = qid; render(); break;
     case "cancel-edit": ui.editing = false; editDraft = null; render(); break;
