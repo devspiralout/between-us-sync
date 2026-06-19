@@ -144,6 +144,22 @@ button:focus-visible { outline: 2px solid var(--amber); outline-offset: 3px; }
 .setup label { display: block; margin: 16px 0 6px; }
 .setup .btn-primary { width: 100%; margin-top: 24px; }
 
+/* ——— settings ——— */
+.gear { font-size: 18px; line-height: 1; padding: 2px 5px; color: var(--faded); }
+.settings-head { display: flex; justify-content: space-between; align-items: baseline; margin: 4px 0 8px; }
+.settings-head h2 { font-size: 24px; font-style: italic; font-weight: 500; }
+.set-block { padding: 20px 0; border-bottom: 1px solid rgba(242,233,220,0.08); }
+.set-status { font-size: 13.5px; color: var(--faded); margin-top: 8px; }
+select {
+  width: 100%; background: rgba(0,0,0,0.22); border: 1px solid rgba(242,233,220,0.1);
+  border-radius: 10px; padding: 11px 34px 11px 13px; color: var(--parchment); font-size: 16px;
+  font-family: inherit; -webkit-appearance: none; appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 8'%3E%3Cpath d='M1 1l5 5 5-5' stroke='%23A294B8' stroke-width='1.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat; background-position: right 13px center; background-size: 11px;
+}
+select:focus { outline: none; border-color: rgba(227,168,111,0.5); }
+select option { background: var(--card); color: var(--parchment); }
+
 .archive-intro { font-size: 12px; color: var(--dim); text-align: center; letter-spacing: 0.06em; text-transform: uppercase; margin: 2px 0 22px; }
 .archive-date { font-family: "Cormorant Garamond", serif; font-style: italic; font-size: 16px; color: var(--faded); letter-spacing: 0.03em; margin: 30px 0 10px; }
 .archive-date:first-of-type { margin-top: 4px; }

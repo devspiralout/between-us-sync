@@ -72,7 +72,9 @@ exports.dailyReminder = onSchedule("every 60 minutes", async () => {
     const hour = parseInt(val("hour"), 10) % 24;
     const todayKey = `${val("year")}-${val("month")}-${val("day")}`;
 
-    if (hour !== REMIND_HOUR) return;
+    const remindHour = (typeof r.remindHour === "number") ? r.remindHour : REMIND_HOUR;
+    if (remindHour < 0) return;         // reminders turned off for this room
+    if (hour !== remindHour) return;
     if (r.lastRemind === todayKey) return; // already nudged today
 
     // if they've already started today's questions, no nudge needed — just mark it

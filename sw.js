@@ -2,7 +2,7 @@
 // network-first (so a new deploy shows up immediately when online, cache only as
 // an offline fallback); fonts and the versioned Firebase SDK are immutable so they
 // stay cache-first. NEVER intercept Firestore traffic — that would freeze live sync.
-const CACHE = "between-us-sync-v19";
+const CACHE = "between-us-sync-v20";
 const SHELL = ["./", "./index.html", "./style.css", "./app.js", "./questions.js", "./firebase-config.js", "./manifest.json", "./icon-192.png", "./icon-512.png"];
 
 self.addEventListener("install", (e) => {

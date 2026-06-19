@@ -481,16 +481,32 @@ async function enableNotifications() {
   }
 }
 
-// the small footer control reflecting notification state for this device
-function notifControl() {
-  if (!messaging || typeof Notification === "undefined") return ""; // unsupported — hide entirely
-  const perm = Notification.permission;
-  if (perm === "denied") return ` · <span style="color:var(--dim)">notifications blocked in settings</span>`;
-  if (perm === "granted" && state.tokens && state.tokens[local.who]) {
-    return ` · <span style="color:var(--sage)">🔔 on</span>`;
-  }
-  return ` · <button class="btn-ghost" style="font-size:11.5px" data-action="enable-notifs">turn on notifications</button>`;
+// stop this device receiving notifications (clears its token from the room)
+async function disableNotifications() {
+  try {
+    await updateDoc(roomRef(), { [`tokens.${local.who}`]: null });
+    toast("Notifications off for this device.");
+    render();
+  } catch (e) { console.error(e); toast("Couldn't turn notifications off — try again."); }
 }
+
+async function saveName(name) {
+  const clean = (name || "").trim();
+  if (!clean) { toast("Add a name first."); return; }
+  try { await updateDoc(roomRef(), { [`names.${local.who}`]: clean }); toast("Name saved."); }
+  catch (e) { console.error(e); toast("Couldn't save your name — try again."); }
+}
+
+async function setRemindHour(h) {
+  try { await updateDoc(roomRef(), { remindHour: h }); }
+  catch (e) { console.error(e); toast("Couldn't update the reminder — try again."); }
+}
+
+const hourLabel = (h) => {
+  const ap = h < 12 ? "AM" : "PM";
+  let hr = h % 12; if (hr === 0) hr = 12;
+  return `${hr}:00 ${ap}`;
+};
 
 // ——— templates ———
 const heartSvg = (filled) => `
@@ -814,6 +830,71 @@ function archiveView() {
     ).join("");
 }
 
+function settingsView() {
+  const me = local.who;
+  const myName = state.names[me] || "";
+  const supported = Boolean(messaging) && typeof Notification !== "undefined";
+  const perm = (typeof Notification !== "undefined") ? Notification.permission : "unsupported";
+  const hasToken = Boolean(state.tokens && state.tokens[me]);
+  const rh = (typeof state.remindHour === "number") ? state.remindHour : 18;
+
+  let notif;
+  if (!supported) {
+    notif = `<p class="hint">Not available on this device or browser. On iPhone, add the app to your Home Screen (iOS 16.4+) first.</p>`;
+  } else if (perm === "denied") {
+    notif = `<p class="hint">Blocked — turn them back on for this app in your device's settings.</p>`;
+  } else if (perm === "granted" && hasToken) {
+    notif = `<p class="set-status"><span style="color:var(--sage)">🔔 On for this device</span></p>
+             <button class="btn-ghost" data-action="disable-notifs">turn off on this device</button>`;
+  } else {
+    notif = `<button class="btn-small" data-action="enable-notifs">Turn on notifications</button>`;
+  }
+
+  const opts = [`<option value="-1" ${rh < 0 ? "selected" : ""}>Off</option>`]
+    .concat([...Array(24).keys()].map((h) => `<option value="${h}" ${h === rh ? "selected" : ""}>${hourLabel(h)}</option>`))
+    .join("");
+
+  return `
+    <div class="settings-screen rise">
+      <div class="settings-head">
+        <h2 class="bu-serif">Settings</h2>
+        <button class="btn-ghost" data-action="close-settings">done</button>
+      </div>
+
+      <section class="set-block">
+        <label class="player-label">Your name</label>
+        <div style="display:flex; gap:8px; margin-top:6px">
+          <input type="text" id="set-name" value="${esc(myName)}" autocomplete="off" style="flex:1">
+          <button class="btn-small" data-action="save-name">Save</button>
+        </div>
+      </section>
+
+      <section class="set-block">
+        <label class="player-label">Notifications</label>
+        <div style="margin-top:8px">${notif}</div>
+      </section>
+
+      <section class="set-block">
+        <label class="player-label">Daily reminder</label>
+        <p class="hint" style="margin:6px 0 8px">A nudge if you haven't drawn the day's question, in your room's timezone.</p>
+        <select id="set-remind" data-action="set-remind">${opts}</select>
+      </section>
+
+      <section class="set-block">
+        <label class="player-label">Your room</label>
+        <p class="set-status">code <span class="bu-serif" style="letter-spacing:0.06em; color:var(--amber)">${prettyCode(local.code)}</span></p>
+        <div style="display:flex; gap:10px; flex-wrap:wrap; margin-top:8px">
+          <button class="btn-small" data-action="share-link">Share join link</button>
+          <button class="btn-ghost" data-action="copy-code">copy code</button>
+        </div>
+      </section>
+
+      <section class="set-block" style="border:none">
+        <button class="btn-ghost" data-action="sign-out">sign out on this device</button>
+      </section>
+    </div>`;
+}
+
 // Streak = consecutive days (in the room's timezone, ending today or yesterday)
 // on which a question was *both-answered and opened*. Derived from the revealedAt
 // timestamps so both devices always agree and there's nothing to keep in sync.
@@ -863,21 +944,25 @@ function render() {
   const keptLabel = `Kept${(state.favs || []).length ? ` · ${state.favs.length}` : ""}`;
   const storyCount = Object.values(state.notes || {}).filter((n) => n && n.revealed).length;
   const storyLabel = `Our Story${storyCount ? ` · ${storyCount}` : ""}`;
+  const main = ui.view === "settings" ? settingsView()
+    : ui.view === "story" ? archiveView()
+    : ui.view === "kept" ? keptView()
+    : todayView();
   app.innerHTML = `
     <header>
       <h1>Between Us</h1>
-      ${streak}
+      <div style="display:flex; gap:14px; align-items:center">
+        ${streak}
+        <button class="btn-ghost gear" data-action="open-settings" aria-label="Settings" title="Settings">⚙</button>
+      </div>
     </header>
     <nav>
       <button class="${ui.view === "today" ? "active" : ""}" data-action="nav" data-view="today">Today</button>
       <button class="${ui.view === "story" ? "active" : ""}" data-action="nav" data-view="story">${storyLabel}</button>
       <button class="${ui.view === "kept" ? "active" : ""}" data-action="nav" data-view="kept">${keptLabel}</button>
     </nav>
-    <main>${ui.view === "today" ? todayView() : ui.view === "story" ? archiveView() : keptView()}</main>
-    <p class="progress-line" style="margin:0 0 18px">
-      ${ui.online ? "" : "offline — changes will sync when you're back · "}you're ${esc(state.names[local.who])} · room ${prettyCode(local.code)}${notifControl()} ·
-      <button class="btn-ghost" style="font-size:11.5px" data-action="sign-out">sign out</button>
-    </p>`;
+    <main>${main}</main>
+    ${ui.online ? "" : `<p class="progress-line" style="margin:0 0 18px">offline — changes will sync when you're back</p>`}`;
   const ta = app.querySelector("textarea");
   if (ta && ui.editing !== false) {
     ta.focus();
@@ -919,7 +1004,11 @@ app.addEventListener("click", (e) => {
     case "share-link": shareJoin(); break;
     case "copy-code": navigator.clipboard?.writeText(prettyCode(local.code)).then(() => toast("Copied.")); break;
     case "dismiss-share": ui.joinStep = null; render(); break;
+    case "open-settings": ui.view = "settings"; ui.editing = false; ui.picking = false; render(); break;
+    case "close-settings": ui.view = "today"; render(); break;
+    case "save-name": withBusy(btn, () => saveName(document.getElementById("set-name").value)); break;
     case "enable-notifs": withBusy(btn, () => enableNotifications()); break;
+    case "disable-notifs": withBusy(btn, () => disableNotifications()); break;
     case "sign-out":
       if (window.confirm("Sign out on this device? Your room and all your answers stay safe — sign back in any time, on any device, to return. No code needed.")) signOutUser();
       break;
@@ -943,6 +1032,12 @@ app.addEventListener("click", (e) => {
     case "reveal-early": withBusy(btn, () => revealEarly(qid)); break;
     case "reveal-both": withBusy(btn, () => revealEarly(qid)); break;
   }
+});
+
+// the daily-reminder dropdown
+app.addEventListener("change", (e) => {
+  const el = e.target.closest("[data-action]");
+  if (el && el.dataset.action === "set-remind") setRemindHour(Number(el.value));
 });
 
 // Enter-to-submit: on a single-line input, Enter fires that screen's primary
